@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     jq \
     ripgrep \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # pnpm
@@ -31,7 +32,6 @@ RUN npm install -g openclaw@latest
 RUN useradd -m -s /bin/bash app \
     && mkdir -p /workspace \
     && chown app:app /workspace
-USER app
 WORKDIR /home/app
 
 # Copy bridge gateway and install ws dependency

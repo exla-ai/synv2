@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Fix workspace permissions as root, then re-exec as app user ──
+if [ "$(id -u)" = "0" ]; then
+  chown app:app /workspace
+  exec gosu app "$0" "$@"
+fi
+
 echo "=== Synv2 Project Container ==="
 echo "Project: ${PROJECT_NAME:-unknown}"
 
