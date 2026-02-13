@@ -1,0 +1,17 @@
+# Synapse Caddy reverse proxy configuration
+# Replace __DOMAIN__ with actual domain or use :443 for IP-based access
+
+# With domain (auto TLS via Let's Encrypt):
+# __DOMAIN__ {
+#     reverse_proxy localhost:4000
+# }
+
+# Without domain (self-signed TLS):
+:443 {
+    tls internal
+    reverse_proxy localhost:4000
+}
+
+:80 {
+    reverse_proxy localhost:4000
+}
