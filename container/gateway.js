@@ -13,7 +13,7 @@ const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-5-20250929';
 const WORKSPACE = process.env.WORKSPACE || '/workspace';
 const PROJECT_NAME = process.env.PROJECT_NAME || 'project';
 const MAX_TOKENS = 16384;
-const MAX_TOOL_TURNS = 25;
+const MAX_TOOL_TURNS = 75;
 
 if (!API_KEY) {
   console.error('ANTHROPIC_API_KEY is required');
