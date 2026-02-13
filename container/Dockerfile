@@ -25,33 +25,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # pnpm
 RUN npm install -g pnpm
 
-# MCP servers (pre-installed, activated via MCP_SERVERS env)
-RUN npm install -g \
-    @modelcontextprotocol/server-filesystem \
-    @modelcontextprotocol/server-github \
-    @modelcontextprotocol/server-postgres \
-    @modelcontextprotocol/server-fetch \
-    @modelcontextprotocol/server-brave-search \
-    @modelcontextprotocol/server-puppeteer \
-    @modelcontextprotocol/server-memory \
-    exa-mcp-server
-
-# Deploy CLIs
-RUN npm install -g vercel
-RUN curl -L https://fly.io/install.sh | sh
-ENV FLYCTL_INSTALL="/root/.fly"
-ENV PATH="$FLYCTL_INSTALL/bin:$PATH"
-RUN npm install -g supabase
-
-# Modal (Python)
-RUN pip3 install --break-system-packages modal
-
-# AWS CLI v2
-RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscli.zip \
-    && unzip -q /tmp/awscli.zip -d /tmp \
-    && /tmp/aws/install \
-    && rm -rf /tmp/aws /tmp/awscli.zip
-
 # App user
 RUN useradd -m -s /bin/bash app
 USER app

@@ -8,8 +8,8 @@ ADMIN_TOKEN="__ADMIN_TOKEN__"
 ENCRYPTION_KEY="__ENCRYPTION_KEY__"
 DOMAIN="__DOMAIN__"
 
-# ── Install Docker ────────────────────────────────────────────
-dnf install -y docker git
+# ── Install Docker and build tools ────────────────────────────
+dnf install -y docker git gcc gcc-c++ make python3
 systemctl enable docker
 systemctl start docker
 
@@ -34,6 +34,7 @@ usermod -aG docker synv2
 docker network create synv2-net 2>/dev/null || true
 
 # ── Clone repo and build ─────────────────────────────────────
+git config --global --add safe.directory /opt/synv2
 SYNV2_DIR="/opt/synv2"
 git clone https://github.com/exla-ai/synv2.git "$SYNV2_DIR" || {
   mkdir -p "$SYNV2_DIR"
