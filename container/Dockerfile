@@ -1,4 +1,4 @@
-FROM debian:stable-slim
+FROM node:22-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,16 +18,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y nodejs \
-    && rm -rf /var/lib/apt/lists/*
-
 # pnpm
 RUN npm install -g pnpm
 
-# Python tools (Modal, etc.)
+# Python tools (Modal, Supabase, etc.)
 RUN pip install --break-system-packages modal supabase
+
+# Install OpenClaw
+RUN npm install -g openclaw@latest
 
 # App user + workspace
 RUN useradd -m -s /bin/bash app \
@@ -36,7 +34,7 @@ RUN useradd -m -s /bin/bash app \
 USER app
 WORKDIR /home/app
 
-# Copy gateway and install its deps
+# Copy bridge gateway and install ws dependency
 COPY --chown=app:app gateway.js /home/app/gateway.js
 RUN cd /home/app && npm init -y > /dev/null 2>&1 && npm install ws
 
@@ -48,7 +46,7 @@ VOLUME ["/workspace"]
 
 EXPOSE 18789
 
-HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=15s --timeout=5s --start-period=60s --retries=3 \
     CMD /home/app/healthcheck.sh
 
 ENTRYPOINT ["/home/app/entrypoint.sh"]

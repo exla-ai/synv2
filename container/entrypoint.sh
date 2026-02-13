@@ -26,6 +26,39 @@ echo "Services:"
 [ -n "${EXA_API_KEY:-}" ]            && echo "  Exa:      yes" || echo "  Exa:      -"
 [ -n "${DISCORD_BOT_TOKEN:-}" ]      && echo "  Discord:  yes" || echo "  Discord:  -"
 
-# ── Start gateway ──────────────────────────────────────────────
-echo "Starting gateway on :18789..."
+# ── Configure OpenClaw ──────────────────────────────────────────
+mkdir -p /home/app/.openclaw
+
+# Generate gateway auth token
+GATEWAY_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)"
+export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+export OPENCLAW_GATEWAY_PORT="18790"
+
+echo "Configuring OpenClaw..."
+openclaw onboard \
+  --non-interactive \
+  --anthropic-api-key "${ANTHROPIC_API_KEY}" \
+  --workspace "/workspace" \
+  --gateway-port 18790 \
+  --gateway-bind lan \
+  --gateway-auth token \
+  --skip-daemon \
+  2>&1 || echo "Onboard completed (or already configured)"
+
+# ── Start OpenClaw gateway in background on :18790 ──────────────
+echo "Starting OpenClaw gateway on :18790..."
+openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" &
+OPENCLAW_PID=$!
+
+# Wait for OpenClaw to be ready
+for i in $(seq 1 30); do
+  if curl -sf http://127.0.0.1:18790/health >/dev/null 2>&1; then
+    echo "OpenClaw gateway ready"
+    break
+  fi
+  sleep 1
+done
+
+# ── Start synv2 bridge gateway on :18789 ────────────────────────
+echo "Starting bridge gateway on :18789..."
 exec node /home/app/gateway.js
