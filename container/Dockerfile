@@ -25,8 +25,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # pnpm
 RUN npm install -g pnpm
 
-# App user
-RUN useradd -m -s /bin/bash app
+# App user + workspace
+RUN useradd -m -s /bin/bash app \
+    && mkdir -p /workspace \
+    && chown app:app /workspace
 USER app
 WORKDIR /home/app
 
@@ -38,9 +40,6 @@ RUN cd /home/app && npm init -y > /dev/null 2>&1 && npm install ws
 COPY --chown=app:app entrypoint.sh /home/app/entrypoint.sh
 COPY --chown=app:app healthcheck.sh /home/app/healthcheck.sh
 RUN chmod +x /home/app/entrypoint.sh /home/app/healthcheck.sh
-
-# Workspace volume mount point
-RUN mkdir -p /workspace
 VOLUME ["/workspace"]
 
 EXPOSE 18789
