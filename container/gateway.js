@@ -39,7 +39,9 @@ wss.on('connection', (clientWs) => {
   }
 
   // Connect to local OpenClaw gateway
-  openclawWs = new WebSocket(`ws://127.0.0.1:${OPENCLAW_PORT}`);
+  openclawWs = new WebSocket(`ws://127.0.0.1:${OPENCLAW_PORT}`, {
+    headers: { 'Origin': `http://127.0.0.1:${OPENCLAW_PORT}` },
+  });
 
   openclawWs.on('message', (data) => {
     let msg;

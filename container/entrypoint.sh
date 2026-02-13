@@ -46,6 +46,10 @@ openclaw onboard \
   --skip-daemon \
   2>&1 || echo "Onboard completed (or already configured)"
 
+# Allow local connections without origin check
+openclaw config set gateway.controlUi.allowedOrigins '["*"]' 2>/dev/null || true
+openclaw config set gateway.controlUi.allowInsecureAuth true 2>/dev/null || true
+
 # ── Start OpenClaw gateway in background on :18790 ──────────────
 echo "Starting OpenClaw gateway on :18790..."
 openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" --allow-unconfigured &
