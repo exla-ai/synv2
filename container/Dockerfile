@@ -25,9 +25,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # pnpm
 RUN npm install -g pnpm
 
-# OpenClaw (AI agent gateway)
-RUN npm install -g @anthropic/openclaw
-
 # MCP servers (pre-installed, activated via MCP_SERVERS env)
 RUN npm install -g \
     @modelcontextprotocol/server-filesystem \
@@ -60,8 +57,11 @@ RUN useradd -m -s /bin/bash app
 USER app
 WORKDIR /home/app
 
-# Copy config and entrypoint
-COPY --chown=app:app openclaw-config.js /home/app/openclaw-config.js
+# Copy gateway and install its deps
+COPY --chown=app:app gateway.js /home/app/gateway.js
+RUN cd /home/app && npm init -y > /dev/null 2>&1 && npm install ws
+
+# Copy entrypoint and healthcheck
 COPY --chown=app:app entrypoint.sh /home/app/entrypoint.sh
 COPY --chown=app:app healthcheck.sh /home/app/healthcheck.sh
 RUN chmod +x /home/app/entrypoint.sh /home/app/healthcheck.sh
