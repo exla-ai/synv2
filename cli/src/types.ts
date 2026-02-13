@@ -56,7 +56,7 @@ export interface ChatMessage {
 }
 
 export interface StreamDelta {
-  type: 'text_delta' | 'tool_use' | 'tool_result' | 'error' | 'done';
+  type: 'text_delta' | 'tool_start' | 'tool_use' | 'tool_result' | 'error' | 'done';
   text?: string;
   tool?: string;
   input?: string;

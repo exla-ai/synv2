@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     unzip \
     jq \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js 22
@@ -24,6 +25,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # pnpm
 RUN npm install -g pnpm
+
+# Python tools (Modal, etc.)
+RUN pip install --break-system-packages modal supabase
 
 # App user + workspace
 RUN useradd -m -s /bin/bash app \

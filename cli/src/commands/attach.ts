@@ -31,7 +31,7 @@ export async function attachCommand(name: string): Promise<void> {
       ui.handleDelta(delta);
     },
     onOpen: () => {
-      ui.showStatus(`Connected to "${name}". Type /quit to disconnect.\n`);
+      ui.showBanner();
       ui.prompt();
     },
     onClose: (_code, _reason) => {
@@ -53,6 +53,7 @@ export async function attachCommand(name: string): Promise<void> {
       console.log('Disconnected.');
       process.exit(0);
     },
+    projectName: name,
   });
 
   // Handle Ctrl+C
