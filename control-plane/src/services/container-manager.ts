@@ -36,8 +36,8 @@ export async function createProjectContainer(projectName: string): Promise<strin
   const containerId = await dockerService.createContainer({
     name: projectName,
     env,
-    memoryMb: 56_000,
-    cpus: 7,
+    memoryMb: 115_000,
+    cpus: 15,
   });
 
   updateProject(projectName, { container_id: containerId, status: 'running' });
