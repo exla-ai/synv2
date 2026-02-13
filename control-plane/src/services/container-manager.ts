@@ -3,7 +3,7 @@ import { decrypt } from './secrets.js';
 import { getProject, updateProject, getSecrets } from '../db/index.js';
 
 const GATEWAY_PORT = 18789;
-const HEALTH_TIMEOUT_MS = 60_000;
+const HEALTH_TIMEOUT_MS = 120_000;
 const HEALTH_INTERVAL_MS = 2_000;
 
 export async function createProjectContainer(projectName: string): Promise<string> {
