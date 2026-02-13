@@ -32,6 +32,8 @@ export class ChatUI {
   private spinnerInterval: ReturnType<typeof setInterval> | null = null;
   private spinnerFrame = 0;
   private currentTool = '';
+  private supervisorConnected = false;
+  private agentBusy = false;
 
   constructor(opts: { onMessage: (text: string) => void; onExit: () => void; projectName?: string }) {
     this.onMessage = opts.onMessage;
@@ -156,6 +158,68 @@ export class ChatUI {
         this.stopSpinner();
         this.endStream();
         break;
+
+      case 'history':
+        // Replay buffered events from gateway as dimmed text
+        if (delta.events && delta.events.length > 0) {
+          process.stdout.write(`${c.dim}── recent activity ──${c.reset}\n`);
+          for (const event of delta.events) {
+            this.renderHistoryEvent(event);
+          }
+          process.stdout.write(`${c.dim}── live ──${c.reset}\n\n`);
+        }
+        break;
+
+      case 'status':
+        this.supervisorConnected = delta.supervisorConnected || false;
+        this.agentBusy = delta.agentBusy || false;
+        break;
+
+      case 'client_change':
+        if (delta.supervisorConnected !== undefined) {
+          this.supervisorConnected = delta.supervisorConnected;
+        }
+        break;
+    }
+  }
+
+  private renderHistoryEvent(event: StreamDelta): void {
+    switch (event.type) {
+      case 'text_delta':
+        process.stdout.write(`${c.dim}${event.text || ''}${c.reset}`);
+        break;
+      case 'tool_start':
+        process.stdout.write(`\n${c.dim}  [${event.tool}]${c.reset}`);
+        break;
+      case 'tool_use': {
+        const icon = TOOL_ICONS[event.tool || ''] || '>';
+        if (event.input) {
+          let display = '';
+          try {
+            const parsed = JSON.parse(event.input);
+            if (event.tool === 'bash' && parsed.command) display = parsed.command;
+            else if (parsed.path) display = parsed.path;
+            else display = event.input;
+          } catch { display = event.input; }
+          process.stdout.write(`${c.dim}  ${icon} ${display}${c.reset}\n`);
+        }
+        break;
+      }
+      case 'tool_result':
+        if (event.output) {
+          const lines = event.output.split('\n');
+          const maxLines = 5;
+          const display = lines.length > maxLines
+            ? [...lines.slice(0, maxLines), `... (${lines.length - maxLines} more)`]
+            : lines;
+          process.stdout.write(`${c.dim}${display.map(l => `  ${l}`).join('\n')}${c.reset}\n`);
+        }
+        break;
+      case 'done':
+        process.stdout.write(`${c.dim}\n---${c.reset}\n`);
+        break;
+      default:
+        break;
     }
   }
 
@@ -169,6 +233,10 @@ export class ChatUI {
 
   showBanner(): void {
     process.stdout.write(`\n${c.cyan}${c.bold}  synv2${c.reset} ${c.dim}— ${this.projectName}${c.reset}\n`);
+    const supervisorStatus = this.supervisorConnected
+      ? `${c.green}active${c.reset}${c.dim} (paused while you're attached)${c.reset}`
+      : `${c.dim}not connected${c.reset}`;
+    process.stdout.write(`${c.dim}  Supervisor: ${supervisorStatus}\n`);
     process.stdout.write(`${c.dim}  Type /quit to disconnect\n${c.reset}\n`);
   }
 

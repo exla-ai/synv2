@@ -56,10 +56,20 @@ export interface ChatMessage {
 }
 
 export interface StreamDelta {
-  type: 'text_delta' | 'tool_start' | 'tool_use' | 'tool_result' | 'error' | 'done';
+  type: 'text_delta' | 'tool_start' | 'tool_use' | 'tool_result' | 'error' | 'done'
+    | 'history' | 'status' | 'client_change';
   text?: string;
   tool?: string;
   input?: string;
   output?: string;
   error?: string;
+  // history type
+  events?: StreamDelta[];
+  // status type
+  agentBusy?: boolean;
+  humanCount?: number;
+  supervisorConnected?: boolean;
+  ocConnected?: boolean;
+  // client_change type
+  humans?: number;
 }

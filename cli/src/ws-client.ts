@@ -57,6 +57,10 @@ export class WSClient {
     this.send({ type: 'user_message', content: text });
   }
 
+  identify(role: 'human' | 'supervisor'): void {
+    this.send({ type: 'identify', role });
+  }
+
   close(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

@@ -25,6 +25,31 @@ Local Machine                      AWS EC2 Instance
 └──────────────┘                  └─────────────────────────────────┘
 ```
 
+### Persistent Supervisor Architecture (per container)
+
+```
+                  ┌─────────────┐
+                  │  OpenClaw   │  One persistent WS connection
+                  │  :18790     │  Fixed session key per project
+                  └──────┬──────┘
+                         │
+                  ┌──────┴──────┐
+                  │  gateway.js │  Manages persistent OC connection
+                  │  :18789     │  Broadcasts events to all clients
+                  └──┬───────┬──┘
+                     │       │
+              ┌──────┴──┐ ┌──┴────────┐
+              │supervisor│ │CLI attach │  Multiple clients share
+              │  .js     │ │(via proxy)│  the same OC session
+              └─────────┘ └───────────┘
+```
+
+- **gateway.js** owns the persistent OpenClaw connection (fixed session key `main:webchat:synv2-{PROJECT_NAME}`)
+- All clients (supervisor + humans via `synv2 attach`) share the same OpenClaw session
+- Gateway buffers last 50 events so late-joining clients see recent context
+- Supervisor pauses autonomous prompts when humans are attached, resumes when they leave
+- Memory files (`SHORT_TERM_MEMORY.md`, `LONG_TERM_MEMORY.md`) provide continuity across context compaction
+
 ## Packages
 
 | Package | Path | Purpose |
@@ -39,11 +64,11 @@ Local Machine                      AWS EC2 Instance
 ### CLI (`cli/src/`)
 - `index.ts` — Commander.js entry with all commands
 - `api-client.ts` — fetch wrapper with Bearer auth for control plane API
-- `ws-client.ts` — WebSocket client for OpenClaw chat relay
-- `chat-ui.ts` — readline terminal UI: `>` prompt, streamed deltas, tool calls
+- `ws-client.ts` — WebSocket client for OpenClaw chat relay, `identify()` method for role announcement
+- `chat-ui.ts` — readline terminal UI: `>` prompt, streamed deltas, tool calls, history replay, supervisor status
 - `config.ts` — reads/writes `~/.synapse/config.json`
 - `commands/init.ts` — creates project + prompts for all service tokens interactively
-- `commands/attach.ts` — opens WS chat session
+- `commands/attach.ts` — opens WS chat session, identifies as human, receives history + supervisor status
 - `commands/secrets.ts` — set/list/delete secrets
 - `commands/setup.ts` — runs infra/setup.sh, parses output, saves config
 
@@ -60,7 +85,9 @@ Local Machine                      AWS EC2 Instance
 
 ### Container (`container/`)
 - `Dockerfile` — Debian slim + Node 22 + OpenClaw + 7 MCP servers + Vercel/Fly/Supabase/Modal/AWS CLIs
-- `entrypoint.sh` — headless OpenClaw onboard, config generation, Modal token setup, gateway start
+- `entrypoint.sh` — headless OpenClaw onboard, config generation, Modal token setup, gateway + supervisor start. `SUPERVISOR_ENABLED` env var (default `true`) controls supervisor startup
+- `gateway.js` — Persistent bridge: owns single OpenClaw WS connection, multi-client broadcast, event buffer (50), client identification (`identify` messages), status/client_change broadcasting, auto-reconnect
+- `supervisor.js` — Autonomous agent loop: state machine (INIT→PROMPTING→WAITING→DELAY→PAUSED), human-aware pause/resume, full/continuation prompts, exponential backoff, crash recovery
 - `openclaw-config.js` — generates openclaw.json with MCP servers from `MCP_SERVERS` env var (CommonJS)
 - `healthcheck.sh` — curl gateway /health
 
@@ -96,16 +123,35 @@ synapse secrets set <project> KEY VALUE
 1. synapse attach my-app
 2. CLI → GET /api/projects/my-app (verify running)
 3. CLI → WS wss://host/ws/projects/my-app/chat?token=xxx
-4. Control plane → WS ws://<container-ip>:18789 (OpenClaw gateway)
-5. User types → CLI sends over WS → relay → OpenClaw
-6. OpenClaw streams response → relay → CLI renders in terminal
-7. Ctrl+C → graceful close → "Disconnected."
+4. Control plane → WS relay → container gateway.js (:18789)
+5. CLI sends { type: "identify", role: "human" }
+6. Gateway sends { type: "history", events: [...] } (last 50 events)
+7. Gateway sends { type: "status", agentBusy, humanCount, supervisorConnected }
+8. Gateway broadcasts { type: "client_change", humans: N } → supervisor pauses
+9. User types → CLI sends user_message → gateway → OpenClaw (shared session)
+10. OpenClaw streams → gateway broadcasts to ALL clients (supervisor + humans)
+11. Ctrl+C → human disconnects → gateway broadcasts client_change → supervisor resumes
+```
+
+## Supervisor Flow
+
+```
+1. Container starts → entrypoint.sh launches OpenClaw, gateway.js, supervisor.js
+2. Supervisor connects to gateway, sends { type: "identify", role: "supervisor" }
+3. Waits for status with ocConnected=true, sends full context prompt (memory files + plan + goal)
+4. Agent works → supervisor tracks text/tool metrics per turn
+5. Turn ends (done/error) → delay → continuation prompt (lighter, just memory + processes)
+6. Human attaches → client_change with humans>0 → supervisor enters PAUSED state
+7. Human disconnects → client_change with humans=0 → 10s delay → supervisor resumes
+8. Exponential backoff on empty/error turns (15s → 2min → 4min → 8min → 10min max)
+9. Gateway reconnects automatically on OpenClaw connection drop
 ```
 
 ## Design Decisions
 
 - **Auth**: Bearer API token in `~/.synapse/config.json`, generated during `synapse setup`
-- **Chat**: WebSocket relay through control plane (no exposed container ports)
+- **Chat**: WebSocket relay through control plane (no exposed container ports). Gateway owns one persistent OpenClaw session; all clients (supervisor + humans) share it
+- **Supervisor**: Core feature for all projects (SUPERVISOR_ENABLED=true by default). Persistent WS to gateway, state machine with human-aware pause/resume, memory files for cross-compaction continuity
 - **Storage**: Docker named volumes (`synapse-<name>-workspace`) on EBS
 - **Infra**: Shell scripts + AWS CLI (not CDK — single instance, overkill)
 - **MCP servers**: Pre-installed in Dockerfile, configured at boot via env vars

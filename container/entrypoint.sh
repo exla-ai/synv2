@@ -88,11 +88,16 @@ for i in $(seq 1 15); do
 done
 
 # ── Start supervisor loop (keeps agent working) ──────────────────
-echo "Starting supervisor loop..."
-node /home/app/supervisor.js &
-SUPERVISOR_PID=$!
+SUPERVISOR_PID=""
+if [ "${SUPERVISOR_ENABLED:-true}" = "true" ]; then
+  echo "Starting supervisor loop..."
+  node /home/app/supervisor.js &
+  SUPERVISOR_PID=$!
+else
+  echo "Supervisor disabled (SUPERVISOR_ENABLED=${SUPERVISOR_ENABLED:-})"
+fi
 
-echo "All services started (OpenClaw=$OPENCLAW_PID, Bridge=$BRIDGE_PID, Supervisor=$SUPERVISOR_PID)"
+echo "All services started (OpenClaw=$OPENCLAW_PID, Bridge=$BRIDGE_PID, Supervisor=${SUPERVISOR_PID:-none})"
 
 # ── Wait for any child to exit ────────────────────────────────────
 wait -n $OPENCLAW_PID $BRIDGE_PID 2>/dev/null || true

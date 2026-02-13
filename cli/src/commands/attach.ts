@@ -25,14 +25,28 @@ export async function attachCommand(name: string): Promise<void> {
 
   let ui: ChatUI;
   let ws: WSClient;
+  let bannerShown = false;
 
   ws = new WSClient(wsUrl, {
     onDelta: (delta) => {
+      // Show banner after we get the first status message (has supervisor info)
+      if (delta.type === 'status' && !bannerShown) {
+        ui.handleDelta(delta); // update internal state first
+        ui.showBanner();
+        bannerShown = true;
+        return;
+      }
+      // Show history before prompting
+      if (delta.type === 'history') {
+        ui.handleDelta(delta);
+        if (bannerShown) ui.prompt();
+        return;
+      }
       ui.handleDelta(delta);
     },
     onOpen: () => {
-      ui.showBanner();
-      ui.prompt();
+      // Identify as human so supervisor knows to pause
+      ws.identify('human');
     },
     onClose: (_code, _reason) => {
       ui.showStatus('Disconnected.');

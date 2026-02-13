@@ -1,6 +1,5 @@
-// Supervisor — keeps the OpenClaw agent working continuously
-// Each turn uses a FRESH OpenClaw session (gateway generates unique session keys)
-// so the agent never runs out of context. Memory files provide continuity.
+// Supervisor — keeps the OpenClaw agent working continuously via a persistent
+// gateway connection. Pauses when humans are attached, resumes when they leave.
 
 const { WebSocket } = require('ws');
 const fs = require('fs');
@@ -14,12 +13,36 @@ const MIN_DELAY_MS = 15_000;               // 15s between turns normally
 const BACKOFF_DELAY_MS = 120_000;          // 2 min after empty/error turns
 const MAX_BACKOFF_MS = 600_000;            // 10 min max backoff
 const EMPTY_THRESHOLD = 3;                 // after 3 consecutive empty turns, back off
+const HUMAN_RESUME_DELAY_MS = 10_000;      // 10s after last human disconnects before resuming
 
+// ── State machine ───────────────────────────────────────────────
+// INIT → PROMPTING → WAITING → DELAY → PROMPTING...
+// PAUSED (when humans attached) — resumes to DELAY when they leave
+const STATE = {
+  INIT: 'INIT',
+  PROMPTING: 'PROMPTING',
+  WAITING: 'WAITING',
+  DELAY: 'DELAY',
+  PAUSED: 'PAUSED',
+};
+
+let state = STATE.INIT;
 let turnCount = 0;
 let consecutiveEmpty = 0;
+let humanCount = 0;
+let agentBusy = false;
+let ws = null;
+let connected = false;
+let turnTimer = null;
+let delayTimer = null;
+let resumeTimer = null;
+let turnTextChars = 0;
+let turnToolCount = 0;
+let turnMsgCount = 0;
+let firstPromptSent = false;
 
 function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
+  const line = `[${new Date().toISOString()}] [${state}] ${msg}`;
   console.log(line);
   try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
 }
@@ -28,12 +51,18 @@ function readFile(path) {
   try { return fs.readFileSync(path, 'utf-8'); } catch { return null; }
 }
 
+function setState(newState) {
+  const old = state;
+  state = newState;
+  if (old !== newState) log(`State: ${old} → ${newState}`);
+}
+
+// ── Prompt builders ─────────────────────────────────────────────
 function getSystemContext() {
   const shortMem = readFile('/workspace/SHORT_TERM_MEMORY.md') || '(no short-term memory file found)';
   const longMem = readFile('/workspace/LONG_TERM_MEMORY.md') || '(no long-term memory file found)';
   const plan = readFile('/workspace/plan.md') || '(no plan.md found)';
 
-  // Check what's running
   let processInfo = '';
   try {
     const { execSync } = require('child_process');
@@ -42,7 +71,6 @@ function getSystemContext() {
     processInfo = `\n## Currently Running Processes\n\`\`\`\n${tmux}\n\n${procs}\n\`\`\``;
   } catch {}
 
-  // Check compression output if it exists
   let compressionStatus = '';
   try {
     const { execSync } = require('child_process');
@@ -56,13 +84,14 @@ function getSystemContext() {
   return { shortMem, longMem, plan, processInfo, compressionStatus };
 }
 
-function buildPrompt() {
+function buildFullPrompt() {
   const ctx = getSystemContext();
 
   return `You are an autonomous AI agent working on the Hutter Prize compression challenge.
 Your workspace is /workspace. You have passwordless sudo. You have uv, clang, gcc, cmake, tmux, Python 3.
 
-THIS IS A FRESH SESSION — you have no memory of previous turns. Your memory files are your continuity:
+This is a PERSISTENT SESSION — you share this session with a supervisor that sends you prompts.
+Your memory files provide continuity across context compaction:
 
 ## Your Short-Term Memory
 ${ctx.shortMem}
@@ -97,77 +126,223 @@ Current SOTA holder: fx2-cmix (Kaido Orav & Byron Knoll, Sept 2024).
 Go.`;
 }
 
-function runTurn() {
-  return new Promise((resolve) => {
-    turnCount++;
-    log(`=== Turn ${turnCount} ===`);
+function buildContinuationPrompt() {
+  const ctx = getSystemContext();
 
-    const ws = new WebSocket(`ws://127.0.0.1:${BRIDGE_PORT}`);
-    let done = false;
-    let msgCount = 0;
-    let textChars = 0;
-    let toolCount = 0;
+  return `Continue working on your task. Here is your current memory state:
 
-    const timeout = setTimeout(() => {
-      if (!done) {
-        log(`Turn ${turnCount} timed out after ${TURN_TIMEOUT_MS / 1000}s (${msgCount} msgs, ${textChars} chars, ${toolCount} tools)`);
-        done = true;
-        consecutiveEmpty = 0; // timeout means it was working
-        try { ws.close(); } catch {}
-        resolve('timeout');
+## Short-Term Memory
+${ctx.shortMem}
+
+## Long-Term Memory
+${ctx.longMem}
+${ctx.processInfo}
+${ctx.compressionStatus}
+
+Check running processes, pick up where you left off, and keep making progress.
+Update your memory files before your turn ends.`;
+}
+
+// ── Turn management ─────────────────────────────────────────────
+function sendPrompt() {
+  if (!connected || agentBusy) {
+    log(`Cannot send prompt: connected=${connected}, agentBusy=${agentBusy}`);
+    scheduleTurnDelay(MIN_DELAY_MS);
+    return;
+  }
+
+  turnCount++;
+  turnTextChars = 0;
+  turnToolCount = 0;
+  turnMsgCount = 0;
+
+  const prompt = firstPromptSent ? buildContinuationPrompt() : buildFullPrompt();
+  firstPromptSent = true;
+
+  log(`=== Turn ${turnCount} === Sending prompt (${prompt.length} chars)`);
+  setState(STATE.PROMPTING);
+
+  ws.send(JSON.stringify({ type: 'user_message', content: prompt }));
+  setState(STATE.WAITING);
+
+  // Turn timeout
+  turnTimer = setTimeout(() => {
+    log(`Turn ${turnCount} timed out after ${TURN_TIMEOUT_MS / 1000}s (${turnMsgCount} msgs, ${turnTextChars} chars, ${turnToolCount} tools)`);
+    consecutiveEmpty = 0; // timeout means it was working
+    onTurnEnd('timeout');
+  }, TURN_TIMEOUT_MS);
+}
+
+function onTurnEnd(result) {
+  if (turnTimer) {
+    clearTimeout(turnTimer);
+    turnTimer = null;
+  }
+
+  let delay;
+  if (result === 'ok' || result === 'timeout') {
+    consecutiveEmpty = 0;
+    delay = MIN_DELAY_MS;
+  } else {
+    consecutiveEmpty++;
+    if (consecutiveEmpty >= EMPTY_THRESHOLD) {
+      delay = Math.min(BACKOFF_DELAY_MS * Math.pow(2, consecutiveEmpty - EMPTY_THRESHOLD), MAX_BACKOFF_MS);
+      log(`${consecutiveEmpty} consecutive empty turns — backing off ${delay / 1000}s`);
+    } else {
+      delay = BACKOFF_DELAY_MS;
+    }
+  }
+
+  log(`Turn ${turnCount} result: ${result} (${turnMsgCount} msgs, ${turnTextChars} chars, ${turnToolCount} tools) — next in ${delay / 1000}s`);
+
+  // If humans are attached, go to PAUSED instead of scheduling next turn
+  if (humanCount > 0) {
+    setState(STATE.PAUSED);
+    log(`Humans attached (${humanCount}) — pausing autonomous prompts`);
+  } else {
+    scheduleTurnDelay(delay);
+  }
+}
+
+function scheduleTurnDelay(delay) {
+  setState(STATE.DELAY);
+  delayTimer = setTimeout(() => {
+    delayTimer = null;
+    if (humanCount > 0) {
+      setState(STATE.PAUSED);
+      log(`Humans attached — pausing`);
+    } else {
+      sendPrompt();
+    }
+  }, delay);
+}
+
+// ── Human presence management ───────────────────────────────────
+function onHumanCountChange(newCount) {
+  const oldCount = humanCount;
+  humanCount = newCount;
+
+  if (newCount > 0 && oldCount === 0) {
+    // Humans just connected — pause if in DELAY
+    log(`Human(s) connected (${newCount}) — will pause after current turn`);
+    if (state === STATE.DELAY && delayTimer) {
+      clearTimeout(delayTimer);
+      delayTimer = null;
+      setState(STATE.PAUSED);
+    }
+  } else if (newCount === 0 && oldCount > 0) {
+    // All humans left — resume after delay
+    log(`All humans disconnected — resuming in ${HUMAN_RESUME_DELAY_MS / 1000}s`);
+    if (resumeTimer) clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(() => {
+      resumeTimer = null;
+      if (humanCount === 0 && state === STATE.PAUSED) {
+        log('Resuming autonomous prompts');
+        if (agentBusy) {
+          // Agent is mid-turn from a human message, wait for it
+          setState(STATE.WAITING);
+        } else {
+          sendPrompt();
+        }
       }
-    }, TURN_TIMEOUT_MS);
+    }, HUMAN_RESUME_DELAY_MS);
+  }
+}
 
-    ws.on('open', () => {
-      const prompt = buildPrompt();
-      log(`Sending prompt (${prompt.length} chars)`);
-      ws.send(JSON.stringify({ type: 'user_message', content: prompt }));
-    });
+// ── WebSocket connection to gateway ─────────────────────────────
+function connectToGateway() {
+  log('Connecting to gateway...');
+  ws = new WebSocket(`ws://127.0.0.1:${BRIDGE_PORT}`);
 
-    ws.on('message', (data) => {
-      let msg;
-      try { msg = JSON.parse(data.toString()); } catch { return; }
-      msgCount++;
+  ws.on('open', () => {
+    connected = true;
+    log('Connected to gateway');
+    // Identify as supervisor
+    ws.send(JSON.stringify({ type: 'identify', role: 'supervisor' }));
+  });
 
-      if (msg.type === 'text_delta') textChars += (msg.text || '').length;
-      if (msg.type === 'tool_start') toolCount++;
+  ws.on('message', (data) => {
+    let msg;
+    try { msg = JSON.parse(data.toString()); } catch { return; }
 
-      if (msg.type === 'done') {
-        const wasEmpty = textChars === 0 && toolCount === 0;
-        log(`Turn ${turnCount} done: ${msgCount} msgs, ${textChars} chars, ${toolCount} tools${wasEmpty ? ' (EMPTY)' : ''}`);
-        done = true;
-        clearTimeout(timeout);
-        try { ws.close(); } catch {}
-        resolve(wasEmpty ? 'empty' : 'ok');
+    // Status update from gateway
+    if (msg.type === 'status') {
+      agentBusy = msg.agentBusy || false;
+      humanCount = msg.humanCount || 0;
+      log(`Status: agentBusy=${agentBusy}, humans=${humanCount}, ocConnected=${msg.ocConnected}`);
+
+      // Start the first prompt if agent isn't busy and no humans
+      if (state === STATE.INIT && !agentBusy && humanCount === 0 && msg.ocConnected) {
+        sendPrompt();
+      } else if (state === STATE.INIT && (agentBusy || humanCount > 0)) {
+        setState(STATE.PAUSED);
+        log('Agent busy or humans present at startup — waiting');
+      } else if (state === STATE.INIT && !msg.ocConnected) {
+        log('OpenClaw not yet connected — waiting for status update');
       }
-      if (msg.type === 'error') {
-        log(`Turn ${turnCount} error: ${msg.error}`);
-        done = true;
-        clearTimeout(timeout);
-        try { ws.close(); } catch {}
-        resolve('error');
-      }
-    });
+    }
 
-    ws.on('error', (err) => {
-      log(`WS error: ${err.message}`);
-      if (!done) {
-        done = true;
-        clearTimeout(timeout);
-        resolve('ws_error');
-      }
-    });
+    // Client change — human connect/disconnect
+    else if (msg.type === 'client_change') {
+      onHumanCountChange(msg.humans || 0);
+    }
 
-    ws.on('close', () => {
-      if (!done) {
-        done = true;
-        clearTimeout(timeout);
-        resolve('closed');
+    // History — ignore (we don't need replay as supervisor)
+    else if (msg.type === 'history') {
+      // noop
+    }
+
+    // Agent stream events — track for turn metrics
+    else if (msg.type === 'text_delta') {
+      turnTextChars += (msg.text || '').length;
+      turnMsgCount++;
+    }
+    else if (msg.type === 'tool_start') {
+      turnToolCount++;
+      turnMsgCount++;
+    }
+    else if (msg.type === 'tool_use' || msg.type === 'tool_result') {
+      turnMsgCount++;
+    }
+
+    // Turn end signals
+    else if (msg.type === 'done') {
+      turnMsgCount++;
+      if (state === STATE.WAITING) {
+        const wasEmpty = turnTextChars === 0 && turnToolCount === 0;
+        onTurnEnd(wasEmpty ? 'empty' : 'ok');
+      } else if (state === STATE.PAUSED) {
+        // Done came from a human's message — agent finished, stay paused
+        agentBusy = false;
+        log('Agent finished (human-initiated turn) — staying paused');
       }
-    });
+    }
+    else if (msg.type === 'error') {
+      turnMsgCount++;
+      if (state === STATE.WAITING) {
+        onTurnEnd('error');
+      } else {
+        agentBusy = false;
+      }
+    }
+  });
+
+  ws.on('error', (err) => {
+    log(`Gateway WS error: ${err.message}`);
+  });
+
+  ws.on('close', () => {
+    connected = false;
+    agentBusy = false;
+    log('Gateway connection lost — reconnecting in 5s');
+    if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+    if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+    setState(STATE.INIT);
+    setTimeout(connectToGateway, 5000);
   });
 }
 
+// ── Wait for gateway to be ready ────────────────────────────────
 async function waitForBridge() {
   log('Waiting for bridge gateway...');
   for (let i = 0; i < 120; i++) {
@@ -183,46 +358,19 @@ async function waitForBridge() {
   throw new Error('Bridge gateway never became ready');
 }
 
+// ── Main ────────────────────────────────────────────────────────
 async function main() {
   log(`Supervisor starting for project: ${PROJECT_NAME}`);
   log(`Turn timeout: ${TURN_TIMEOUT_MS / 1000}s`);
 
   await waitForBridge();
-
-  // Main loop — runs forever
-  while (true) {
-    let result;
-    try {
-      result = await runTurn();
-    } catch (err) {
-      log(`Turn crashed: ${err.message}`);
-      result = 'crash';
-    }
-
-    // Decide delay based on result
-    let delay;
-    if (result === 'ok' || result === 'timeout') {
-      consecutiveEmpty = 0;
-      delay = MIN_DELAY_MS;
-    } else {
-      consecutiveEmpty++;
-      if (consecutiveEmpty >= EMPTY_THRESHOLD) {
-        // Exponential backoff: 2min, 4min, 8min, max 10min
-        delay = Math.min(BACKOFF_DELAY_MS * Math.pow(2, consecutiveEmpty - EMPTY_THRESHOLD), MAX_BACKOFF_MS);
-        log(`${consecutiveEmpty} consecutive empty turns — backing off ${delay / 1000}s`);
-      } else {
-        delay = BACKOFF_DELAY_MS;
-      }
-    }
-
-    log(`Next turn in ${delay / 1000}s (result: ${result}, consecutiveEmpty: ${consecutiveEmpty})`);
-    await new Promise(r => setTimeout(r, delay));
-  }
+  connectToGateway();
 }
 
 // Handle uncaught errors — restart instead of dying
 process.on('uncaughtException', (err) => {
   log(`UNCAUGHT ERROR: ${err.message} — restarting in 30s`);
+  try { if (ws) ws.close(); } catch {}
   setTimeout(() => main().catch(e => log(`FATAL: ${e.message}`)), 30000);
 });
 
