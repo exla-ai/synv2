@@ -29,7 +29,14 @@ wss.on('connection', (clientWs) => {
   let openclawWs = null;
   let connected = false;
   let pendingMessages = [];
-  let sessionKey = null;
+  let sessionKey = `main:webchat:synv2-${PROJECT_NAME}`;
+  let currentRunId = null;
+
+  function send(obj) {
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify(obj));
+    }
+  }
 
   // Connect to local OpenClaw gateway
   openclawWs = new WebSocket(`ws://127.0.0.1:${OPENCLAW_PORT}`);
@@ -38,120 +45,126 @@ wss.on('connection', (clientWs) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
 
-    // Handle OpenClaw protocol messages
-    switch (msg.type) {
-      case 'event':
-        if (msg.event === 'connect.challenge') {
-          // Respond with connect request
-          const connectReq = {
-            type: 'req',
-            id: crypto.randomUUID(),
-            method: 'connect',
-            params: {
-              minProtocol: 3,
-              maxProtocol: 3,
-              client: {
-                id: `synv2-${PROJECT_NAME}`,
-                version: '0.1.0',
-                platform: 'linux',
-                mode: 'operator',
-              },
-              role: 'operator',
-              scopes: ['operator.read', 'operator.write'],
-              caps: [],
-              commands: [],
-              permissions: {},
-              auth: { token: OPENCLAW_TOKEN },
-              locale: 'en-US',
-              userAgent: `synv2-gateway/0.1.0`,
+    if (msg.type === 'event') {
+      if (msg.event === 'connect.challenge') {
+        // Respond with connect handshake
+        openclawWs.send(JSON.stringify({
+          type: 'req',
+          id: crypto.randomUUID(),
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: {
+              id: 'webchat',
+              version: '0.1.0',
+              platform: 'linux',
+              mode: 'webchat',
             },
-          };
-          openclawWs.send(JSON.stringify(connectReq));
-        } else if (msg.event === 'agent.text') {
-          // Stream text delta to client
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: 'text_delta', text: msg.payload?.text || '' }));
-          }
-        } else if (msg.event === 'agent.tool_call') {
-          // Tool call started
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({
-              type: 'tool_start',
-              tool: msg.payload?.name || msg.payload?.tool || 'tool',
-            }));
-          }
-        } else if (msg.event === 'agent.tool_result') {
-          // Tool result
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({
-              type: 'tool_result',
-              tool: msg.payload?.name || '',
-              output: msg.payload?.output || msg.payload?.result || '',
-            }));
-          }
-        } else if (msg.event === 'agent.done' || msg.event === 'agent.end') {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: 'done' }));
-          }
-        } else if (msg.event === 'agent.error') {
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: 'error', error: msg.payload?.message || 'Agent error' }));
-          }
-        }
-        // Forward any other events as raw for debugging
-        break;
+            role: 'operator',
+            scopes: ['operator.read', 'operator.write'],
+            caps: [],
+            auth: { token: OPENCLAW_TOKEN },
+            userAgent: 'synv2-gateway/0.1.0',
+          },
+        }));
+      }
 
-      case 'res':
-        if (msg.ok && msg.payload?.type === 'hello-ok') {
-          console.log('Connected to OpenClaw gateway');
-          connected = true;
-          // Send any pending messages
-          for (const pendingMsg of pendingMessages) {
-            sendToAgent(pendingMsg);
-          }
-          pendingMessages = [];
-        } else if (msg.ok && msg.payload?.sessionKey) {
-          sessionKey = msg.payload.sessionKey;
-        } else if (!msg.ok && msg.error) {
-          console.error('OpenClaw error:', msg.error);
-          if (clientWs.readyState === WebSocket.OPEN) {
-            clientWs.send(JSON.stringify({ type: 'error', error: msg.error?.message || 'OpenClaw error' }));
+      // Chat events — text streaming
+      else if (msg.event === 'chat') {
+        const p = msg.payload || {};
+        if (p.state === 'delta') {
+          // Extract text from message content
+          const text = extractText(p.message);
+          if (text) send({ type: 'text_delta', text });
+        } else if (p.state === 'final') {
+          send({ type: 'done' });
+          currentRunId = null;
+        } else if (p.state === 'error') {
+          send({ type: 'error', error: p.errorMessage || 'Chat error' });
+          currentRunId = null;
+        } else if (p.state === 'aborted') {
+          send({ type: 'done' });
+          currentRunId = null;
+        }
+      }
+
+      // Agent events — tool use
+      else if (msg.event === 'agent') {
+        const p = msg.payload || {};
+        if (p.stream === 'tool' && p.data) {
+          const d = p.data;
+          const phase = d.phase || '';
+          const name = d.name || 'tool';
+
+          if (phase === 'start') {
+            send({ type: 'tool_start', tool: name });
+            send({ type: 'tool_use', tool: name, input: typeof d.args === 'string' ? d.args : JSON.stringify(d.args || {}) });
+          } else if (phase === 'result') {
+            const output = typeof d.result === 'string' ? d.result : JSON.stringify(d.result || '');
+            send({ type: 'tool_result', tool: name, output });
           }
         }
-        break;
+      }
+    }
+
+    else if (msg.type === 'res') {
+      if (msg.ok && msg.payload?.type === 'hello-ok') {
+        console.log('Connected to OpenClaw gateway (protocol', msg.payload.protocol + ')');
+        connected = true;
+        // Flush pending messages
+        for (const text of pendingMessages) {
+          sendToAgent(text);
+        }
+        pendingMessages = [];
+      } else if (msg.ok && msg.payload?.runId) {
+        currentRunId = msg.payload.runId;
+      } else if (!msg.ok && msg.error) {
+        console.error('OpenClaw error:', JSON.stringify(msg.error));
+        send({ type: 'error', error: msg.error?.message || msg.error?.code || 'OpenClaw error' });
+      }
     }
   });
 
+  function extractText(message) {
+    if (!message) return null;
+    if (typeof message === 'string') return message;
+    // message can be an array of content blocks
+    if (Array.isArray(message)) {
+      return message
+        .filter(b => b.type === 'text')
+        .map(b => b.text)
+        .join('');
+    }
+    if (message.content) return extractText(message.content);
+    if (message.text) return message.text;
+    return null;
+  }
+
   function sendToAgent(text) {
     if (!openclawWs || openclawWs.readyState !== WebSocket.OPEN) return;
-
-    const req = {
+    openclawWs.send(JSON.stringify({
       type: 'req',
       id: crypto.randomUUID(),
       method: 'chat.send',
       params: {
+        sessionKey,
         message: text,
-        session: sessionKey || `synv2:${PROJECT_NAME}`,
+        deliver: false,
+        idempotencyKey: crypto.randomUUID(),
       },
-    };
-    openclawWs.send(JSON.stringify(req));
+    }));
   }
 
   openclawWs.on('error', (err) => {
     console.error('OpenClaw WS error:', err.message);
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({ type: 'error', error: `OpenClaw connection error: ${err.message}` }));
-    }
+    send({ type: 'error', error: `OpenClaw connection error: ${err.message}` });
   });
 
   openclawWs.on('close', () => {
     console.log('OpenClaw connection closed');
-    if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.send(JSON.stringify({ type: 'done' }));
-    }
   });
 
-  // Handle incoming messages from synv2 client
   clientWs.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
@@ -167,9 +180,7 @@ wss.on('connection', (clientWs) => {
 
   clientWs.on('close', () => {
     console.log('Client disconnected');
-    if (openclawWs && openclawWs.readyState === WebSocket.OPEN) {
-      try { openclawWs.close(); } catch {}
-    }
+    try { if (openclawWs?.readyState === WebSocket.OPEN) openclawWs.close(); } catch {}
   });
 });
 
