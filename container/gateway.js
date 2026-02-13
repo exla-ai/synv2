@@ -24,12 +24,14 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (clientWs) => {
-  console.log('Client connected — opening OpenClaw session');
+  // Each connection gets a FRESH session key so context doesn't accumulate
+  const sessionId = crypto.randomUUID().slice(0, 8);
+  const sessionKey = `main:webchat:synv2-${PROJECT_NAME}-${sessionId}`;
+  console.log(`Client connected — new session ${sessionId}`);
 
   let openclawWs = null;
   let connected = false;
   let pendingMessages = [];
-  let sessionKey = `main:webchat:synv2-${PROJECT_NAME}`;
   let currentRunId = null;
 
   function send(obj) {
@@ -76,7 +78,6 @@ wss.on('connection', (clientWs) => {
       else if (msg.event === 'chat') {
         const p = msg.payload || {};
         if (p.state === 'delta') {
-          // Extract text from message content
           const text = extractText(p.message);
           if (text) send({ type: 'text_delta', text });
         } else if (p.state === 'final') {
@@ -112,9 +113,8 @@ wss.on('connection', (clientWs) => {
 
     else if (msg.type === 'res') {
       if (msg.ok && msg.payload?.type === 'hello-ok') {
-        console.log('Connected to OpenClaw gateway (protocol', msg.payload.protocol + ')');
+        console.log(`Connected to OpenClaw (protocol ${msg.payload.protocol}, session ${sessionId})`);
         connected = true;
-        // Flush pending messages
         for (const text of pendingMessages) {
           sendToAgent(text);
         }
@@ -131,7 +131,6 @@ wss.on('connection', (clientWs) => {
   function extractText(message) {
     if (!message) return null;
     if (typeof message === 'string') return message;
-    // message can be an array of content blocks
     if (Array.isArray(message)) {
       return message
         .filter(b => b.type === 'text')
@@ -164,7 +163,7 @@ wss.on('connection', (clientWs) => {
   });
 
   openclawWs.on('close', () => {
-    console.log('OpenClaw connection closed');
+    console.log(`OpenClaw connection closed (session ${sessionId})`);
   });
 
   clientWs.on('message', (data) => {
@@ -181,7 +180,7 @@ wss.on('connection', (clientWs) => {
   });
 
   clientWs.on('close', () => {
-    console.log('Client disconnected');
+    console.log(`Client disconnected (session ${sessionId})`);
     try { if (openclawWs?.readyState === WebSocket.OPEN) openclawWs.close(); } catch {}
   });
 });
