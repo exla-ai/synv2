@@ -3,7 +3,7 @@ import { resolve } from 'path';
 import { migrate } from './schema.js';
 import type { ProjectRow, TokenRow, SecretRow } from '../types.js';
 
-const DB_PATH = process.env.DB_PATH || resolve(process.cwd(), 'synapse.db');
+const DB_PATH = process.env.DB_PATH || resolve(process.cwd(), 'synv2.db');
 
 let _db: Database.Database | null = null;
 

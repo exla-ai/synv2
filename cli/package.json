@@ -1,9 +1,9 @@
 {
-  "name": "@synapse/cli",
+  "name": "@synv2/cli",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "synapse": "./bin/synapse"
+    "synv2": "./bin/synv2"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

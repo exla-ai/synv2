@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Synapse AWS Teardown — Destroys all resources created by setup.sh
+# Synv2 AWS Teardown — Destroys all resources created by setup.sh
 
-REGION="${SYNAPSE_REGION:-us-east-1}"
+REGION="${SYNV2_REGION:-us-east-1}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 RED='\033[0;31m'
@@ -11,19 +11,19 @@ GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-info()  { echo -e "${CYAN}[synapse]${NC} $*"; }
-ok()    { echo -e "${GREEN}[synapse]${NC} $*"; }
-fail()  { echo -e "${RED}[synapse]${NC} $*" >&2; exit 1; }
+info()  { echo -e "${CYAN}[synv2]${NC} $*"; }
+ok()    { echo -e "${GREEN}[synv2]${NC} $*"; }
+fail()  { echo -e "${RED}[synv2]${NC} $*" >&2; exit 1; }
 
 # Read tag name
-if [ -f "${SCRIPT_DIR}/.synapse-tag" ]; then
-  TAG_NAME=$(cat "${SCRIPT_DIR}/.synapse-tag")
+if [ -f "${SCRIPT_DIR}/.synv2-tag" ]; then
+  TAG_NAME=$(cat "${SCRIPT_DIR}/.synv2-tag")
 else
   TAG_NAME="${1:-}"
 fi
 
 if [ -z "$TAG_NAME" ]; then
-  fail "No tag name found. Pass it as argument: ./teardown.sh synapse-XXXX"
+  fail "No tag name found. Pass it as argument: ./teardown.sh synv2-XXXX"
 fi
 
 info "Tearing down: ${TAG_NAME}"
@@ -32,7 +32,7 @@ info "Tearing down: ${TAG_NAME}"
 info "Finding instances..."
 INSTANCE_IDS=$(aws ec2 describe-instances \
   --region "$REGION" \
-  --filters "Name=tag:synapse,Values=${TAG_NAME}" "Name=instance-state-name,Values=running,stopped,pending" \
+  --filters "Name=tag:synv2,Values=${TAG_NAME}" "Name=instance-state-name,Values=running,stopped,pending" \
   --query 'Reservations[].Instances[].InstanceId' \
   --output text)
 
@@ -49,7 +49,7 @@ fi
 info "Releasing Elastic IPs..."
 ALLOC_IDS=$(aws ec2 describe-addresses \
   --region "$REGION" \
-  --filters "Name=tag:synapse,Values=${TAG_NAME}" \
+  --filters "Name=tag:synv2,Values=${TAG_NAME}" \
   --query 'Addresses[].AllocationId' \
   --output text)
 
@@ -104,7 +104,7 @@ aws iam delete-role --role-name "$ROLE_NAME" 2>/dev/null || true
 ok "IAM cleaned up"
 
 # Clean up tag file
-rm -f "${SCRIPT_DIR}/.synapse-tag"
+rm -f "${SCRIPT_DIR}/.synv2-tag"
 
 echo ""
 ok "Teardown complete: ${TAG_NAME}"

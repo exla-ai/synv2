@@ -1,9 +1,9 @@
 {
-  "name": "synapse",
+  "name": "synv2",
   "private": true,
   "scripts": {
-    "dev:cli": "pnpm --filter @synapse/cli dev",
-    "dev:control-plane": "pnpm --filter @synapse/control-plane dev",
+    "dev:cli": "pnpm --filter @synv2/cli dev",
+    "dev:control-plane": "pnpm --filter @synv2/control-plane dev",
     "build": "pnpm -r build"
   }
 }

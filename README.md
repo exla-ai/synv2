@@ -1,4 +1,4 @@
-# Synapse
+# Synv2
 
 Multi-project AI agent platform on AWS. Each project gets its own isolated Docker container with OpenClaw, MCP servers, and deploy CLIs.
 
@@ -7,7 +7,7 @@ Multi-project AI agent platform on AWS. Each project gets its own isolated Docke
 ```
 Local Machine                      AWS EC2 Instance
 ┌──────────────┐                  ┌─────────────────────────────────┐
-│  synapse CLI │ ── HTTPS/WS ──> │  Control Plane (Express :4000)  │
+│  synv2 CLI   │ ── HTTPS/WS ──> │  Control Plane (Express :4000)  │
 │              │                  │  Caddy (TLS :443)               │
 │  - setup     │                  │  SQLite (project metadata)      │
 │  - init      │                  │                                 │
@@ -39,21 +39,21 @@ cd cli && pnpm link --global
 ### 2. Provision AWS Infrastructure
 
 ```bash
-synapse setup
+synv2 setup
 ```
 
-This creates an EC2 instance with Docker, Caddy (TLS), and the control plane. Config is saved to `~/.synapse/config.json`.
+This creates an EC2 instance with Docker, Caddy (TLS), and the control plane. Config is saved to `~/.synv2/config.json`.
 
 ### 3. Create a Project
 
 ```bash
-synapse init my-app
+synv2 init my-app
 ```
 
 ### 4. Chat with Your AI Agent
 
 ```bash
-synapse attach my-app
+synv2 attach my-app
 ```
 
 Type messages, get Claude responses with full tool access. `Ctrl+C` to disconnect.
@@ -61,9 +61,9 @@ Type messages, get Claude responses with full tool access. `Ctrl+C` to disconnec
 ### 5. Manage Projects
 
 ```bash
-synapse projects          # List all projects
-synapse status            # Infrastructure health
-synapse destroy my-app    # Tear down a project
+synv2 projects          # List all projects
+synv2 status            # Infrastructure health
+synv2 destroy my-app    # Tear down a project
 ```
 
 ## Local Development (No AWS)
@@ -77,10 +77,10 @@ pnpm install
 pnpm dev
 
 # Build the project container image
-docker build -t synapse-project ./container
+docker build -t synv2-project ./container
 
-# Create ~/.synapse/config.json pointing to localhost
-echo '{"host":"http://localhost:4000","token":"dev-token"}' > ~/.synapse/config.json
+# Create ~/.synv2/config.json pointing to localhost
+echo '{"host":"http://localhost:4000","token":"dev-token"}' > ~/.synv2/config.json
 
 # Terminal 2: Use CLI
 cd cli

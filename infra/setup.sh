@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Synapse AWS Setup — Provisions VPC, SG, IAM, EC2 instance with Docker + control plane
-# Outputs SYNAPSE_HOST, SYNAPSE_TOKEN, INSTANCE_ID, ELASTIC_IP for CLI config
+# Synv2 AWS Setup — Provisions VPC, SG, IAM, EC2 instance with Docker + control plane
+# Outputs SYNV2_HOST, SYNV2_TOKEN, INSTANCE_ID, ELASTIC_IP for CLI config
 
-REGION="${SYNAPSE_REGION:-us-east-1}"
-INSTANCE_TYPE="${SYNAPSE_INSTANCE_TYPE:-t3.medium}"
-DOMAIN="${SYNAPSE_DOMAIN:-}"
-KEY_NAME="${SYNAPSE_KEY_NAME:-}"
+REGION="${SYNV2_REGION:-us-east-1}"
+INSTANCE_TYPE="${SYNV2_INSTANCE_TYPE:-t3.medium}"
+DOMAIN="${SYNV2_DOMAIN:-}"
+KEY_NAME="${SYNV2_KEY_NAME:-}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -15,9 +15,9 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-info()  { echo -e "${CYAN}[synapse]${NC} $*"; }
-ok()    { echo -e "${GREEN}[synapse]${NC} $*"; }
-fail()  { echo -e "${RED}[synapse]${NC} $*" >&2; exit 1; }
+info()  { echo -e "${CYAN}[synv2]${NC} $*"; }
+ok()    { echo -e "${GREEN}[synv2]${NC} $*"; }
+fail()  { echo -e "${RED}[synv2]${NC} $*" >&2; exit 1; }
 
 # ── Check prerequisites ───────────────────────────────────────
 command -v aws >/dev/null 2>&1 || fail "AWS CLI not found. Install: https://aws.amazon.com/cli/"
@@ -28,7 +28,7 @@ info "Instance type: ${INSTANCE_TYPE}"
 
 # ── Tag prefix for resource tracking ─────────────────────────
 SUFFIX=$(openssl rand -hex 4)
-TAG_NAME="synapse-${SUFFIX}"
+TAG_NAME="synv2-${SUFFIX}"
 
 # ── Generate admin API token ─────────────────────────────────
 ADMIN_TOKEN=$(openssl rand -hex 32)
@@ -59,7 +59,7 @@ info "Creating security group..."
 SG_ID=$(aws ec2 create-security-group \
   --region "$REGION" \
   --group-name "${TAG_NAME}-sg" \
-  --description "Synapse control plane" \
+  --description "Synv2 control plane" \
   --vpc-id "$VPC_ID" \
   --query 'GroupId' \
   --output text)
@@ -89,7 +89,7 @@ aws iam create-role \
       "Action": "sts:AssumeRole"
     }]
   }' \
-  --tags Key=synapse,Value="$TAG_NAME" \
+  --tags Key=synv2,Value="$TAG_NAME" \
   >/dev/null 2>&1
 
 # Attach managed policies for AWS service access
@@ -147,7 +147,7 @@ LAUNCH_ARGS=(
   --iam-instance-profile "Name=$INSTANCE_PROFILE"
   --user-data "$USER_DATA"
   --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":50,"VolumeType":"gp3"}}]'
-  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${TAG_NAME}},{Key=synapse,Value=${TAG_NAME}}]"
+  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${TAG_NAME}},{Key=synv2,Value=${TAG_NAME}}]"
   --query 'Instances[0].InstanceId'
   --output text
 )
@@ -165,7 +165,7 @@ info "Allocating Elastic IP..."
 ALLOC_ID=$(aws ec2 allocate-address \
   --region "$REGION" \
   --domain vpc \
-  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=${TAG_NAME}},{Key=synapse,Value=${TAG_NAME}}]" \
+  --tag-specifications "ResourceType=elastic-ip,Tags=[{Key=Name,Value=${TAG_NAME}},{Key=synv2,Value=${TAG_NAME}}]" \
   --query 'AllocationId' \
   --output text)
 
@@ -198,12 +198,12 @@ else
 fi
 
 # ── Save tag name for teardown ───────────────────────────────
-echo "$TAG_NAME" > "${SCRIPT_DIR}/.synapse-tag"
+echo "$TAG_NAME" > "${SCRIPT_DIR}/.synv2-tag"
 
 # ── Output for CLI config parsing ────────────────────────────
 echo ""
-echo "SYNAPSE_HOST=${HOST}"
-echo "SYNAPSE_TOKEN=${ADMIN_TOKEN}"
+echo "SYNV2_HOST=${HOST}"
+echo "SYNV2_TOKEN=${ADMIN_TOKEN}"
 echo "INSTANCE_ID=${INSTANCE_ID}"
 echo "ELASTIC_IP=${ELASTIC_IP}"
 echo "TAG_NAME=${TAG_NAME}"

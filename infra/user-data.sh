@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-exec > /var/log/synapse-setup.log 2>&1
+exec > /var/log/synv2-setup.log 2>&1
 
-echo "=== Synapse EC2 Bootstrap ==="
+echo "=== Synv2 EC2 Bootstrap ==="
 
 ADMIN_TOKEN="__ADMIN_TOKEN__"
 ENCRYPTION_KEY="__ENCRYPTION_KEY__"
@@ -21,29 +21,30 @@ dnf install -y nodejs
 npm install -g pnpm
 
 # ── Install Caddy ─────────────────────────────────────────────
-dnf install -y 'dnf-command(copr)'
-dnf copr enable -y @caddy/caddy
-dnf install -y caddy
+curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=amd64" -o /usr/bin/caddy
+chmod +x /usr/bin/caddy
+mkdir -p /etc/caddy
+caddy version
 
-# ── Create synapse user ──────────────────────────────────────
-useradd -m -s /bin/bash synapse
-usermod -aG docker synapse
+# ── Create synv2 user ──────────────────────────────────────
+useradd -m -s /bin/bash synv2
+usermod -aG docker synv2
 
 # ── Create Docker network ────────────────────────────────────
-docker network create synapse-net 2>/dev/null || true
+docker network create synv2-net 2>/dev/null || true
 
 # ── Clone repo and build ─────────────────────────────────────
-SYNAPSE_DIR="/opt/synapse"
-git clone https://github.com/viraat/synapse.git "$SYNAPSE_DIR" || {
-  mkdir -p "$SYNAPSE_DIR"
+SYNV2_DIR="/opt/synv2"
+git clone https://github.com/exla-ai/synv2.git "$SYNV2_DIR" || {
+  mkdir -p "$SYNV2_DIR"
   echo "Git clone failed — will need manual setup"
 }
 
-cd "$SYNAPSE_DIR"
+cd "$SYNV2_DIR"
 
 # Build the project container image
 if [ -d container ]; then
-  docker build -t synapse-project ./container
+  docker build -t synv2-project ./container
 fi
 
 # Install control plane dependencies
@@ -60,17 +61,17 @@ export ADMIN_TOKEN
 export ENCRYPTION_KEY
 
 # ── Systemd service for control plane ────────────────────────
-cat > /etc/systemd/system/synapse.service <<EOF
+cat > /etc/systemd/system/synv2.service <<EOF
 [Unit]
-Description=Synapse Control Plane
+Description=Synv2 Control Plane
 After=docker.service network-online.target
 Requires=docker.service
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=synapse
-WorkingDirectory=${SYNAPSE_DIR}/control-plane
+User=synv2
+WorkingDirectory=${SYNV2_DIR}/control-plane
 Environment=PORT=4000
 Environment=ADMIN_TOKEN=${ADMIN_TOKEN}
 Environment=ENCRYPTION_KEY=${ENCRYPTION_KEY}
@@ -86,8 +87,8 @@ EOF
 # ── Seed the admin token into the database ───────────────────
 node -e "
   const crypto = require('crypto');
-  const Database = require('${SYNAPSE_DIR}/control-plane/node_modules/better-sqlite3');
-  const db = new Database('${SYNAPSE_DIR}/control-plane/synapse.db');
+  const Database = require('${SYNV2_DIR}/control-plane/node_modules/better-sqlite3');
+  const db = new Database('${SYNV2_DIR}/control-plane/synv2.db');
   db.pragma('journal_mode = WAL');
   db.exec(\`CREATE TABLE IF NOT EXISTS tokens (
     token_hash TEXT PRIMARY KEY,
@@ -100,11 +101,11 @@ node -e "
   console.log('Admin token seeded');
 " || echo "Token seeding will happen on first startup"
 
-chown -R synapse:synapse "$SYNAPSE_DIR"
+chown -R synv2:synv2 "$SYNV2_DIR"
 
 systemctl daemon-reload
-systemctl enable synapse
-systemctl start synapse
+systemctl enable synv2
+systemctl start synv2
 
 # ── Caddy reverse proxy ──────────────────────────────────────
 if [ -n "$DOMAIN" ]; then
@@ -126,7 +127,25 @@ else
 CADDY
 fi
 
-systemctl enable caddy
-systemctl restart caddy
+# Create caddy systemd service
+cat > /etc/systemd/system/caddy.service <<CADDYSVC
+[Unit]
+Description=Caddy Reverse Proxy
+After=network-online.target
+Wants=network-online.target
 
-echo "=== Synapse bootstrap complete ==="
+[Service]
+Type=simple
+ExecStart=/usr/bin/caddy run --config /etc/caddy/Caddyfile
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+CADDYSVC
+
+systemctl daemon-reload
+systemctl enable caddy
+systemctl start caddy
+
+echo "=== Synv2 bootstrap complete ==="

@@ -4,7 +4,7 @@ const ALGORITHM = 'aes-256-gcm';
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'dev-encryption-key-change-in-prod';
 
 function deriveKey(): Buffer {
-  return scryptSync(ENCRYPTION_KEY, 'synapse-salt', 32);
+  return scryptSync(ENCRYPTION_KEY, 'synv2-salt', 32);
 }
 
 export function encrypt(plaintext: string): string {

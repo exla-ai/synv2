@@ -2,9 +2,9 @@ import Dockerode from 'dockerode';
 
 const docker = new Dockerode({ socketPath: '/var/run/docker.sock' });
 
-const NETWORK_NAME = 'synapse-net';
-const IMAGE_NAME = 'synapse-project';
-const LABEL_PREFIX = 'synapse.project';
+const NETWORK_NAME = 'synv2-net';
+const IMAGE_NAME = 'synv2-project';
+const LABEL_PREFIX = 'synv2.project';
 
 export interface ContainerInfo {
   id: string;
@@ -28,12 +28,12 @@ export async function createContainer(opts: {
 }): Promise<string> {
   await ensureNetwork();
 
-  const volumeName = `synapse-${opts.name}-workspace`;
+  const volumeName = `synv2-${opts.name}-workspace`;
   const envArray = Object.entries(opts.env).map(([k, v]) => `${k}=${v}`);
 
   const container = await docker.createContainer({
     Image: IMAGE_NAME,
-    name: `synapse-${opts.name}`,
+    name: `synv2-${opts.name}`,
     Env: envArray,
     Labels: {
       [LABEL_PREFIX]: opts.name,
@@ -62,7 +62,7 @@ export async function createContainer(opts: {
 }
 
 export async function removeContainer(name: string, removeVolume = true): Promise<void> {
-  const containerName = `synapse-${name}`;
+  const containerName = `synv2-${name}`;
   try {
     const container = docker.getContainer(containerName);
     try {
@@ -77,7 +77,7 @@ export async function removeContainer(name: string, removeVolume = true): Promis
 
   if (removeVolume) {
     try {
-      const volume = docker.getVolume(`synapse-${name}-workspace`);
+      const volume = docker.getVolume(`synv2-${name}-workspace`);
       await volume.remove();
     } catch {
       // volume not found or in use
@@ -86,7 +86,7 @@ export async function removeContainer(name: string, removeVolume = true): Promis
 }
 
 export async function getContainerInfo(name: string): Promise<ContainerInfo | null> {
-  const containerName = `synapse-${name}`;
+  const containerName = `synv2-${name}`;
   try {
     const container = docker.getContainer(containerName);
     const info = await container.inspect();
@@ -110,7 +110,7 @@ export async function listContainers(): Promise<ContainerInfo[]> {
 
   return containers.map((c) => ({
     id: c.Id,
-    name: c.Labels[LABEL_PREFIX] || c.Names[0].replace(/^\/synapse-/, ''),
+    name: c.Labels[LABEL_PREFIX] || c.Names[0].replace(/^\/synv2-/, ''),
     status: c.State === 'running' ? 'running' : 'stopped',
   }));
 }

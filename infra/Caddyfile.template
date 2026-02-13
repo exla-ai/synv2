@@ -1,4 +1,4 @@
-# Synapse Caddy reverse proxy configuration
+# Synv2 Caddy reverse proxy configuration
 # Replace __DOMAIN__ with actual domain or use :443 for IP-based access
 
 # With domain (auto TLS via Let's Encrypt):

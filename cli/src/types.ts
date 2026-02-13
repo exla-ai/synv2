@@ -1,4 +1,4 @@
-export interface SynapseConfig {
+export interface Synv2Config {
   host: string;
   token: string;
   region?: string;

@@ -1,10 +1,10 @@
-import type { SynapseConfig, Project, ProjectDetail, StatusResponse, ApiError } from './types.js';
+import type { Synv2Config, Project, ProjectDetail, StatusResponse, ApiError } from './types.js';
 
 export class ApiClient {
   private host: string;
   private token: string;
 
-  constructor(config: SynapseConfig) {
+  constructor(config: Synv2Config) {
     this.host = config.host.replace(/\/$/, '');
     this.token = config.token;
   }

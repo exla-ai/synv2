@@ -59,6 +59,11 @@ const MCP_REGISTRY = {
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-memory'],
   },
+  exa: {
+    command: 'npx',
+    args: ['-y', 'exa-mcp-server'],
+    env: { EXA_API_KEY: process.env.EXA_API_KEY || '' },
+  },
 };
 
 // Parse MCP_SERVERS env var

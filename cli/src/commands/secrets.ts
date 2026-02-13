@@ -8,7 +8,7 @@ export async function secretsSetCommand(project: string, key: string, value: str
   try {
     await api.setSecret(project, key, value);
     console.log(`Secret "${key}" set for project "${project}".`);
-    console.log(`Restart the project to apply: synapse restart ${project}`);
+    console.log(`Restart the project to apply: synv2 restart ${project}`);
   } catch (err: any) {
     console.error(`Failed to set secret: ${err.message}`);
     process.exit(1);

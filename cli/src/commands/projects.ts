@@ -8,7 +8,7 @@ export async function projectsCommand(): Promise<void> {
   const projects = await api.listProjects();
 
   if (projects.length === 0) {
-    console.log('No projects. Create one with `synapse init <name>`.');
+    console.log('No projects. Create one with `synv2 init <name>`.');
     return;
   }
 

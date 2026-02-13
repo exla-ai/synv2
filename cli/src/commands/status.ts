@@ -8,7 +8,7 @@ export async function statusCommand(): Promise<void> {
   try {
     const status = await api.getStatus();
 
-    console.log('Synapse Status\n');
+    console.log('Synv2 Status\n');
     console.log(`Host:       ${config.host}`);
     console.log(`Region:     ${config.region || 'unknown'}`);
     console.log(`Uptime:     ${formatUptime(status.uptime)}`);

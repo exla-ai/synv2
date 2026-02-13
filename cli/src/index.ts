@@ -11,7 +11,7 @@ import { restartCommand } from './commands/restart.js';
 const program = new Command();
 
 program
-  .name('synapse')
+  .name('synv2')
   .description('Multi-project AI agent platform')
   .version('0.1.0');
 

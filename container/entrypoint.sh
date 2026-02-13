@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Synapse Project Container ==="
+echo "=== Synv2 Project Container ==="
 echo "Project: ${PROJECT_NAME:-unknown}"
 echo "OpenClaw: $(openclaw --version 2>/dev/null || echo 'installed')"
 
@@ -63,6 +63,30 @@ if [ -n "${GITHUB_TOKEN:-}" ]; then
   echo "GitHub token detected."
 fi
 
+# Exa (search API, used by MCP exa server)
+if [ -n "${EXA_API_KEY:-}" ]; then
+  echo "Exa API key detected."
+fi
+
+# ── Configure Discord bot if token provided ──────────────────
+if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+  echo "Configuring Discord bot..."
+  node -e "
+    const fs = require('fs');
+    const p = '${OPENCLAW_HOME}/openclaw.json';
+    const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+    c.channels = c.channels || {};
+    c.channels.discord = Object.assign(c.channels.discord || {}, {
+      enabled: true,
+      token: process.env.DISCORD_BOT_TOKEN,
+      groupPolicy: 'open',
+      dm: { policy: 'open', allowFrom: ['*'] }
+    });
+    fs.writeFileSync(p, JSON.stringify(c, null, 2));
+    console.log('Discord configured: enabled, open DMs, open group policy');
+  "
+fi
+
 # Start OpenClaw gateway (persistent daemon for chat)
 echo "Starting OpenClaw gateway on :18789..."
 openclaw gateway --port 18789 --verbose &
@@ -85,6 +109,8 @@ echo "  Fly.io:   ${FLY_API_TOKEN:+yes}${FLY_API_TOKEN:-no}"
 echo "  Supabase: ${SUPABASE_ACCESS_TOKEN:+yes}${SUPABASE_ACCESS_TOKEN:-no}"
 echo "  Modal:    ${MODAL_TOKEN_ID:+yes}${MODAL_TOKEN_ID:-no}"
 echo "  GitHub:   ${GITHUB_TOKEN:+yes}${GITHUB_TOKEN:-no}"
+echo "  Exa:      ${EXA_API_KEY:+yes}${EXA_API_KEY:-no}"
+echo "  Discord:  ${DISCORD_BOT_TOKEN:+yes}${DISCORD_BOT_TOKEN:-no}"
 echo "  AWS:      $(aws sts get-caller-identity 2>/dev/null && echo 'yes' || echo 'via IAM role')"
 
 # Keep container alive — wait for gateway process

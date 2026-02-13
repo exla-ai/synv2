@@ -36,7 +36,8 @@ RUN npm install -g \
     @modelcontextprotocol/server-fetch \
     @modelcontextprotocol/server-brave-search \
     @modelcontextprotocol/server-puppeteer \
-    @modelcontextprotocol/server-memory
+    @modelcontextprotocol/server-memory \
+    exa-mcp-server
 
 # Deploy CLIs
 RUN npm install -g vercel

@@ -23,7 +23,7 @@ const server = http.createServer(app);
 // WebSocket server for chat relay
 const wss = new WebSocketServer({ noServer: true });
 
-server.on('upgrade', (req, socket, head) => {
+server.on('upgrade', (req, socket: any, head) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`);
 
   // Authenticate via query param

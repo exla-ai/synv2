@@ -19,7 +19,7 @@ function ask(question: string, defaultVal?: string): Promise<string> {
 }
 
 export async function setupCommand(): Promise<void> {
-  console.log('Synapse AWS Setup\n');
+  console.log('Synv2 AWS Setup\n');
 
   // Check AWS CLI
   try {
@@ -38,9 +38,9 @@ export async function setupCommand(): Promise<void> {
   const setupScript = resolve(INFRA_DIR, 'setup.sh');
   const env = {
     ...process.env,
-    SYNAPSE_REGION: region,
-    SYNAPSE_INSTANCE_TYPE: instanceType,
-    SYNAPSE_DOMAIN: domain,
+    SYNV2_REGION: region,
+    SYNV2_INSTANCE_TYPE: instanceType,
+    SYNV2_DOMAIN: domain,
   };
 
   const proc = spawn('bash', [setupScript], { env, stdio: 'pipe' });
@@ -65,8 +65,8 @@ export async function setupCommand(): Promise<void> {
   }
 
   // Parse output for host, token, instance info
-  const hostMatch = output.match(/SYNAPSE_HOST=(\S+)/);
-  const tokenMatch = output.match(/SYNAPSE_TOKEN=(\S+)/);
+  const hostMatch = output.match(/SYNV2_HOST=(\S+)/);
+  const tokenMatch = output.match(/SYNV2_TOKEN=(\S+)/);
   const instanceIdMatch = output.match(/INSTANCE_ID=(\S+)/);
   const eipMatch = output.match(/ELASTIC_IP=(\S+)/);
 
@@ -84,7 +84,7 @@ export async function setupCommand(): Promise<void> {
     elasticIp: eipMatch?.[1],
   });
 
-  console.log('\nConfiguration saved to ~/.synapse/config.json');
+  console.log('\nConfiguration saved to ~/.synv2/config.json');
   console.log(`Control plane: ${hostMatch[1]}`);
 
   // Wait for health check

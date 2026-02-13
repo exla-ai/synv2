@@ -12,7 +12,7 @@ function ask(question: string): Promise<string> {
   });
 }
 
-const ALL_MCP_SERVERS = ['filesystem', 'fetch', 'memory', 'github', 'brave-search', 'puppeteer', 'postgres'];
+const ALL_MCP_SERVERS = ['filesystem', 'fetch', 'memory', 'github', 'brave-search', 'puppeteer', 'postgres', 'exa'];
 
 export async function initCommand(name: string, opts: { apiKey?: string; mcpServers?: string; interactive?: boolean }): Promise<void> {
   const config = requireConfig();
@@ -50,6 +50,8 @@ export async function initCommand(name: string, opts: { apiKey?: string; mcpServ
       ['MODAL_TOKEN_SECRET', 'Modal token secret: '],
       ['GITHUB_TOKEN', 'GitHub token (github.com/settings/tokens): '],
       ['BRAVE_API_KEY', 'Brave Search API key (brave.com/search/api): '],
+      ['EXA_API_KEY', 'Exa API key (exa.ai): '],
+      ['DISCORD_BOT_TOKEN', 'Discord bot token (discord.com/developers): '],
     ];
 
     let secretsSet = 0;
@@ -76,8 +78,8 @@ export async function initCommand(name: string, opts: { apiKey?: string; mcpServ
       console.log('Project restarted with new secrets.');
     }
 
-    console.log(`\nReady! Attach with: synapse attach ${name}`);
-    console.log(`Add more secrets later: synapse secrets set ${name} KEY VALUE`);
+    console.log(`\nReady! Attach with: synv2 attach ${name}`);
+    console.log(`Add more secrets later: synv2 secrets set ${name} KEY VALUE`);
   } catch (err: any) {
     console.error(`Failed to create project: ${err.message}`);
     process.exit(1);
