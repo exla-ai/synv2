@@ -37,6 +37,7 @@ export OPENCLAW_GATEWAY_PORT="18790"
 echo "Configuring OpenClaw..."
 openclaw onboard \
   --non-interactive \
+  --accept-risk \
   --anthropic-api-key "${ANTHROPIC_API_KEY}" \
   --workspace "/workspace" \
   --gateway-port 18790 \
@@ -47,7 +48,7 @@ openclaw onboard \
 
 # ── Start OpenClaw gateway in background on :18790 ──────────────
 echo "Starting OpenClaw gateway on :18790..."
-openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" &
+openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" --allow-unconfigured &
 OPENCLAW_PID=$!
 
 # Wait for OpenClaw to be ready
