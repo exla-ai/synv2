@@ -44,24 +44,22 @@ async function relay(clientWs: WebSocket, projectName: string): Promise<void> {
   });
 
   upstreamWs.on('error', (err) => {
-    clientWs.close(4500, `Upstream error: ${err.message}`);
+    try { clientWs.close(1011, `Upstream error: ${err.message}`.slice(0, 123)); } catch {}
   });
 
   upstreamWs.on('close', (code, reason) => {
     if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(code, reason.toString());
+      // Only forward valid close codes (1000 or 3000-4999)
+      const safeCode = (code >= 3000 && code <= 4999) || code === 1000 ? code : 1000;
+      try { clientWs.close(safeCode, reason?.toString().slice(0, 123)); } catch {}
     }
   });
 
   clientWs.on('close', () => {
-    if (upstreamWs.readyState === WebSocket.OPEN) {
-      upstreamWs.close();
-    }
+    try { if (upstreamWs.readyState === WebSocket.OPEN) upstreamWs.close(); } catch {}
   });
 
   clientWs.on('error', () => {
-    if (upstreamWs.readyState === WebSocket.OPEN) {
-      upstreamWs.close();
-    }
+    try { if (upstreamWs.readyState === WebSocket.OPEN) upstreamWs.close(); } catch {}
   });
 }
