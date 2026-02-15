@@ -34,7 +34,7 @@ pnpm install
 pnpm build
 ```
 
-This compiles TypeScript to `build/`.
+This compiles TypeScript to `dist/`.
 
 ### 2. Register with Claude Code
 
@@ -45,7 +45,7 @@ Create or edit `.mcp.json` in your project root (already done if you cloned this
   "mcpServers": {
     "synv2": {
       "command": "node",
-      "args": ["/path/to/synv2/mcp-server/build/index.js"]
+      "args": ["/path/to/synv2/mcp-server/dist/index.js"]
     }
   }
 }
@@ -58,7 +58,7 @@ Or add to your global `~/.claude/settings.json`:
   "mcpServers": {
     "synv2": {
       "command": "node",
-      "args": ["/path/to/synv2/mcp-server/build/index.js"]
+      "args": ["/path/to/synv2/mcp-server/dist/index.js"]
     }
   }
 }
@@ -256,7 +256,7 @@ mcp-server/
     tools.ts            # All 9 tool registrations
     api-client.ts       # HTTP client for control plane API
     config.ts           # Reads ~/.synv2/config.json
-  build/                # Compiled JS output (after pnpm build)
+  dist/                # Compiled JS output (after pnpm build)
 ```
 
 ## Development
@@ -278,9 +278,9 @@ pnpm start
 Run `synv2 setup` first to create `~/.synv2/config.json`.
 
 **Tools don't appear in Claude Code**
-1. Check `.mcp.json` path is correct and points to `build/index.js`
+1. Check `.mcp.json` path is correct and points to `dist/index.js`
 2. Restart Claude Code
-3. Run `node mcp-server/build/index.js` manually — it should hang (waiting for STDIO input), not crash
+3. Run `node mcp-server/dist/index.js` manually — it should hang (waiting for STDIO input), not crash
 
 **API errors (401/403)**
 Your token may be invalid. Check `~/.synv2/config.json` matches the token on EC2.

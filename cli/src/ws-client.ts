@@ -20,10 +20,7 @@ export class WSClient {
   }
 
   connect(): void {
-    this.ws = new WebSocket(this.url, {
-      headers: {},
-      rejectUnauthorized: false,
-    });
+    this.ws = new WebSocket(this.url);
 
     this.ws.on('open', () => {
       this.handlers.onOpen();

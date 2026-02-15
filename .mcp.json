@@ -2,7 +2,7 @@
   "mcpServers": {
     "synv2": {
       "command": "node",
-      "args": ["/Users/viraat/Documents/exla/synv2/mcp-server/build/index.js"]
+      "args": ["/Users/viraat/Documents/exla/synv2/mcp-server/dist/index.js"]
     }
   }
 }

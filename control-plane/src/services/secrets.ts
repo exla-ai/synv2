@@ -1,10 +1,17 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto';
 
 const ALGORITHM = 'aes-256-gcm';
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'dev-encryption-key-change-in-prod';
+
+function getEncryptionKey(): string {
+  const key = process.env.ENCRYPTION_KEY;
+  if (!key) {
+    throw new Error('ENCRYPTION_KEY environment variable is required');
+  }
+  return key;
+}
 
 function deriveKey(): Buffer {
-  return scryptSync(ENCRYPTION_KEY, 'synv2-salt', 32);
+  return scryptSync(getEncryptionKey(), 'synv2-salt', 32);
 }
 
 export function encrypt(plaintext: string): string {

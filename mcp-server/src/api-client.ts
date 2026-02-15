@@ -17,6 +17,7 @@ export class ApiClient {
         'Content-Type': 'application/json',
       },
       body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(15_000),
     });
 
     if (!res.ok) {

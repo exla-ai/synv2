@@ -1,13 +1,12 @@
-import { loadConfig } from '../config.js';
+import { requireConfig } from '../config.js';
 import { ApiClient } from '../api-client.js';
 
-export async function taskStartCommand(project: string, opts: { name?: string; description?: string; type?: string; fromFile?: string }) {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: synv2 setup');
-    process.exit(1);
-  }
+interface TaskResponse {
+  task: { name: string; id: string; status: string };
+}
 
+export async function taskStartCommand(project: string, opts: { name?: string; description?: string; type?: string; fromFile?: string }) {
+  const config = requireConfig();
   const api = new ApiClient(config);
 
   let taskDef: any;
@@ -34,10 +33,10 @@ export async function taskStartCommand(project: string, opts: { name?: string; d
   }
 
   try {
-    const result = await api.createTask(project, taskDef);
-    console.log(`Task created: ${(result as any).task.name}`);
-    console.log(`  ID: ${(result as any).task.id}`);
-    console.log(`  Status: ${(result as any).task.status}`);
+    const result = await api.createTask(project, taskDef) as TaskResponse;
+    console.log(`Task created: ${result.task.name}`);
+    console.log(`  ID: ${result.task.id}`);
+    console.log(`  Status: ${result.task.status}`);
   } catch (err: any) {
     console.error(`Failed to create task: ${err.message}`);
     process.exit(1);
@@ -55,12 +54,7 @@ function timeAgo(isoStr: string): string {
 }
 
 export async function taskStatusCommand(project: string) {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: synv2 setup');
-    process.exit(1);
-  }
-
+  const config = requireConfig();
   const api = new ApiClient(config);
 
   try {
@@ -106,12 +100,7 @@ export async function taskStatusCommand(project: string) {
 }
 
 export async function taskStopCommand(project: string) {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: synv2 setup');
-    process.exit(1);
-  }
-
+  const config = requireConfig();
   const api = new ApiClient(config);
 
   try {
@@ -124,12 +113,7 @@ export async function taskStopCommand(project: string) {
 }
 
 export async function taskResumeCommand(project: string) {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: synv2 setup');
-    process.exit(1);
-  }
-
+  const config = requireConfig();
   const api = new ApiClient(config);
 
   try {
@@ -142,12 +126,7 @@ export async function taskResumeCommand(project: string) {
 }
 
 export async function taskRespondCommand(project: string, questionId: string, answer: string) {
-  const config = loadConfig();
-  if (!config) {
-    console.error('Not configured. Run: synv2 setup');
-    process.exit(1);
-  }
-
+  const config = requireConfig();
   const api = new ApiClient(config);
 
   try {
