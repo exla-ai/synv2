@@ -1,5 +1,5 @@
 import { createInterface, Interface } from 'readline';
-import type { StreamDelta } from './types.js';
+import type { StreamDelta, TaskStatus, TaskQuestion } from './types.js';
 
 // ANSI color helpers
 const c = {
@@ -34,6 +34,8 @@ export class ChatUI {
   private currentTool = '';
   private supervisorConnected = false;
   private agentBusy = false;
+  private taskStatus: TaskStatus | null = null;
+  private seenQuestionIds = new Set<string>();
 
   constructor(opts: { onMessage: (text: string) => void; onExit: () => void; projectName?: string }) {
     this.onMessage = opts.onMessage;
@@ -180,6 +182,30 @@ export class ChatUI {
           this.supervisorConnected = delta.supervisorConnected;
         }
         break;
+
+      case 'task_status':
+        this.taskStatus = delta.task || null;
+        if (this.taskStatus) {
+          const ts = this.taskStatus;
+          if (ts.status === 'completed' || ts.status === 'stopped') {
+            process.stdout.write(`\n${c.yellow}Task ${ts.status}: ${ts.name}${ts.completion_reason ? ` (${ts.completion_reason})` : ''}${c.reset}\n`);
+          }
+          // Show new questions
+          if (ts.questions && ts.questions.length > 0) {
+            for (const q of ts.questions) {
+              if (!this.seenQuestionIds.has(q.id)) {
+                this.seenQuestionIds.add(q.id);
+                const tag = q.priority === 'blocking' ? 'BLOCKED' : 'needs input';
+                process.stdout.write(`\n${c.yellow}[Agent ${tag}]${c.reset} "${q.text}"\n`);
+                if (q.context) {
+                  process.stdout.write(`${c.dim}  ${q.context}${c.reset}\n`);
+                }
+                process.stdout.write(`${c.dim}  Use: synv2 task respond ${this.projectName} ${q.id} "your answer"${c.reset}\n`);
+              }
+            }
+          }
+        }
+        break;
     }
   }
 
@@ -237,6 +263,13 @@ export class ChatUI {
       ? `${c.green}active${c.reset}${c.dim} (paused while you're attached)${c.reset}`
       : `${c.dim}not connected${c.reset}`;
     process.stdout.write(`${c.dim}  Supervisor: ${supervisorStatus}\n`);
+    if (this.taskStatus) {
+      const ts = this.taskStatus;
+      let taskLine = `  Task: ${ts.name} [${ts.status}]`;
+      if (ts.turns_completed) taskLine += ` (${ts.turns_completed} turns)`;
+      if (ts.latest_metric !== null && ts.latest_metric !== undefined) taskLine += ` metric=${ts.latest_metric}`;
+      process.stdout.write(`${c.dim}${taskLine}${c.reset}\n`);
+    }
     process.stdout.write(`${c.dim}  Type /quit to disconnect\n${c.reset}\n`);
   }
 

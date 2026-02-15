@@ -21,6 +21,7 @@ let ocConnected = false;
 let agentBusy = false;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+let taskStatus = null; // Latest task status from supervisor
 
 // Event buffer — last N events for late-joining clients
 const eventBuffer = [];
@@ -235,6 +236,7 @@ const server = http.createServer((req, res) => {
       clients: clients.size,
       humans: getHumanCount(),
       supervisorConnected: isSupervisorConnected(),
+      task: taskStatus,
     }));
   } else {
     res.writeHead(404);
@@ -262,6 +264,11 @@ wss.on('connection', (clientWs) => {
     ocConnected,
   });
 
+  // Send current task status if available
+  if (taskStatus) {
+    sendTo(client, { type: 'task_status', task: taskStatus });
+  }
+
   clientWs.on('message', (data) => {
     let msg;
     try { msg = JSON.parse(data.toString()); } catch { return; }
@@ -278,6 +285,16 @@ wss.on('connection', (clientWs) => {
           humans: getHumanCount(),
           supervisorConnected: isSupervisorConnected(),
         });
+      }
+    }
+
+    else if (msg.type === 'task_status') {
+      // Supervisor sends task status updates
+      const changed = JSON.stringify(taskStatus) !== JSON.stringify(msg.task);
+      taskStatus = msg.task || null;
+      if (changed) {
+        // Broadcast to all clients (including other humans)
+        broadcast({ type: 'task_status', task: taskStatus });
       }
     }
 
@@ -305,6 +322,30 @@ wss.on('connection', (clientWs) => {
     }
   });
 });
+
+// ── Load task status from disk as fallback ─────────────────────
+try {
+  const fs = require('fs');
+  const raw = fs.readFileSync('/workspace/.task.json', 'utf-8');
+  const task = JSON.parse(raw);
+  const unanswered = Array.isArray(task.questions) ? task.questions.filter(q => q.answer === null || q.answer === undefined) : [];
+  const blocking = unanswered.filter(q => q.priority === 'blocking');
+  taskStatus = {
+    id: task.id,
+    name: task.name,
+    status: task.status,
+    completion_reason: task.completion_reason || null,
+    turns_completed: task.progress ? task.progress.turns_completed : 0,
+    latest_metric: task.progress ? task.progress.latest_metric : null,
+    summary: task.progress ? task.progress.summary : '',
+    pending_questions: unanswered.length,
+    blocked: blocking.length > 0,
+    questions: unanswered,
+  };
+  console.log(`Loaded task from disk: "${task.name}" (${task.status})`);
+} catch {
+  // No task file — that's fine
+}
 
 // ── Startup ─────────────────────────────────────────────────────
 server.listen(PORT, () => {

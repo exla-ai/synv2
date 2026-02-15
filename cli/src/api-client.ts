@@ -74,6 +74,25 @@ export class ApiClient {
     await this.request('POST', `/api/projects/${encodeURIComponent(name)}/restart`);
   }
 
+  async createTask(projectName: string, taskDef: Record<string, unknown>): Promise<unknown> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/task`, taskDef);
+  }
+
+  async resumeTask(projectName: string): Promise<void> {
+    await this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/task/resume`);
+  }
+
+  async stopTask(projectName: string): Promise<void> {
+    await this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/task/stop`);
+  }
+
+  async respondToQuestion(projectName: string, questionId: string, answer: string): Promise<unknown> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/task/respond`, {
+      question_id: questionId,
+      answer,
+    });
+  }
+
   getWsUrl(projectName: string): string {
     const wsHost = this.host.replace(/^http/, 'ws');
     return `${wsHost}/ws/projects/${encodeURIComponent(projectName)}/chat?token=${this.token}`;

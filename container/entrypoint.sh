@@ -59,15 +59,48 @@ openclaw onboard \
 openclaw config set gateway.controlUi.allowedOrigins '["*"]' 2>/dev/null || true
 openclaw config set gateway.controlUi.allowInsecureAuth true 2>/dev/null || true
 
+# ── Set up autonomous exec approvals (max permissions for headless operation) ──
+openclaw config set agents.defaults.sandbox.mode off 2>/dev/null || true
+openclaw config set tools.elevated.enabled true 2>/dev/null || true
+cat > /home/app/.openclaw/exec-approvals.json << 'APPROVALS_EOF'
+{
+  "version": 1,
+  "socket": {},
+  "defaults": {
+    "security": "full",
+    "ask": "off",
+    "askFallback": "full",
+    "autoAllowSkills": true
+  },
+  "agents": {
+    "main": {
+      "security": "full",
+      "ask": "off",
+      "askFallback": "full",
+      "autoAllowSkills": true,
+      "allowlist": [{"pattern": "*"}]
+    },
+    "*": {
+      "security": "full",
+      "ask": "off",
+      "askFallback": "full",
+      "autoAllowSkills": true,
+      "allowlist": [{"pattern": "*"}]
+    }
+  }
+}
+APPROVALS_EOF
+echo "Exec approvals configured (full autonomous mode)"
+
 # ── Start OpenClaw gateway in background on :18790 ──────────────
 echo "Starting OpenClaw gateway on :18790..."
 openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" --allow-unconfigured &
 OPENCLAW_PID=$!
 
-# Wait for OpenClaw to be ready
-for i in $(seq 1 30); do
+# Wait for OpenClaw to be ready (can take 30-60s on first boot)
+for i in $(seq 1 60); do
   if curl -sf http://127.0.0.1:18790/health >/dev/null 2>&1; then
-    echo "OpenClaw gateway ready"
+    echo "OpenClaw gateway ready (${i}s)"
     break
   fi
   sleep 1

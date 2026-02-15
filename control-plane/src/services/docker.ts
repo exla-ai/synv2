@@ -126,4 +126,37 @@ export async function getDockerStats(): Promise<{ containers_running: number; co
   return { containers_running: running, containers_total: containers.length };
 }
 
+export async function execInContainer(name: string, cmd: string[]): Promise<string> {
+  const containerName = `synv2-${name}`;
+  const container = docker.getContainer(containerName);
+  const exec = await container.exec({
+    Cmd: cmd,
+    AttachStdout: true,
+    AttachStderr: true,
+  });
+  const stream = await exec.start({ hijack: true, stdin: false });
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+    stream.on('end', () => {
+      // Docker multiplexed stream: strip 8-byte header frames
+      const raw = Buffer.concat(chunks);
+      let output = '';
+      let offset = 0;
+      while (offset < raw.length) {
+        if (offset + 8 > raw.length) break;
+        const size = raw.readUInt32BE(offset + 4);
+        if (offset + 8 + size > raw.length) {
+          output += raw.subarray(offset + 8).toString('utf-8');
+          break;
+        }
+        output += raw.subarray(offset + 8, offset + 8 + size).toString('utf-8');
+        offset += 8 + size;
+      }
+      resolve(output);
+    });
+    stream.on('error', reject);
+  });
+}
+
 export { docker, NETWORK_NAME, IMAGE_NAME };

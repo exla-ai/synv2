@@ -7,6 +7,7 @@ import { destroyCommand } from './commands/destroy.js';
 import { statusCommand } from './commands/status.js';
 import { secretsSetCommand, secretsListCommand, secretsDeleteCommand } from './commands/secrets.js';
 import { restartCommand } from './commands/restart.js';
+import { taskStartCommand, taskStatusCommand, taskStopCommand, taskResumeCommand, taskRespondCommand } from './commands/task.js';
 
 const program = new Command();
 
@@ -75,5 +76,39 @@ secrets
   .alias('rm')
   .description('Delete a secret from a project')
   .action(secretsDeleteCommand);
+
+// Task management
+const task = program
+  .command('task')
+  .description('Manage project tasks');
+
+task
+  .command('start <project>')
+  .description('Create a new task for a project')
+  .option('--name <name>', 'Task name')
+  .option('--description <desc>', 'Task description')
+  .option('--type <type>', 'Task type (measurable or subjective)', 'subjective')
+  .option('--from-file <path>', 'Create task from JSON file')
+  .action(taskStartCommand);
+
+task
+  .command('status <project>')
+  .description('Show task progress')
+  .action(taskStatusCommand);
+
+task
+  .command('stop <project>')
+  .description('Stop the running task')
+  .action(taskStopCommand);
+
+task
+  .command('resume <project>')
+  .description('Resume a stopped/completed task')
+  .action(taskResumeCommand);
+
+task
+  .command('respond <project> <question-id> <answer>')
+  .description('Answer an agent question')
+  .action(taskRespondCommand);
 
 program.parse();

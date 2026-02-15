@@ -5,6 +5,8 @@ import { getProject, updateProject, getSecrets } from '../db/index.js';
 const GATEWAY_PORT = 18789;
 const HEALTH_TIMEOUT_MS = 120_000;
 const HEALTH_INTERVAL_MS = 2_000;
+const DEFAULT_MEMORY_MB = parseInt(process.env.CONTAINER_MEMORY_MB || '230000');
+const DEFAULT_CPUS = parseInt(process.env.CONTAINER_CPUS || '30');
 
 export async function createProjectContainer(projectName: string): Promise<string> {
   const project = getProject(projectName);
@@ -36,8 +38,8 @@ export async function createProjectContainer(projectName: string): Promise<strin
   const containerId = await dockerService.createContainer({
     name: projectName,
     env,
-    memoryMb: 115_000,
-    cpus: 15,
+    memoryMb: DEFAULT_MEMORY_MB,
+    cpus: DEFAULT_CPUS,
   });
 
   updateProject(projectName, { container_id: containerId, status: 'running' });

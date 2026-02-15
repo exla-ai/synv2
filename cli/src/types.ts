@@ -55,9 +55,32 @@ export interface ChatMessage {
   content: string;
 }
 
+export interface TaskQuestion {
+  id: string;
+  text: string;
+  context?: string;
+  priority: 'question' | 'blocking';
+  asked_at: string;
+  answered_at: string | null;
+  answer: string | null;
+}
+
+export interface TaskStatus {
+  id: string;
+  name: string;
+  status: string;
+  completion_reason: string | null;
+  turns_completed: number;
+  latest_metric: number | null;
+  summary: string;
+  pending_questions?: number;
+  blocked?: boolean;
+  questions?: TaskQuestion[];
+}
+
 export interface StreamDelta {
   type: 'text_delta' | 'tool_start' | 'tool_use' | 'tool_result' | 'error' | 'done'
-    | 'history' | 'status' | 'client_change';
+    | 'history' | 'status' | 'client_change' | 'task_status';
   text?: string;
   tool?: string;
   input?: string;
@@ -72,4 +95,6 @@ export interface StreamDelta {
   ocConnected?: boolean;
   // client_change type
   humans?: number;
+  // task_status type
+  task?: TaskStatus | null;
 }
