@@ -21,6 +21,9 @@ const MAX_IDLE_DELAY_MS = 600_000;         // 10 min max idle delay
 const BACKOFF_DELAY_MS = 120_000;          // 2 min after empty/error turns
 const MAX_BACKOFF_MS = 600_000;            // 10 min max backoff
 const EMPTY_THRESHOLD = 3;                 // after 3 consecutive empty turns, back off
+const RECOVERY_FULL_THRESHOLD = 5;         // after 5 empty turns, resend full prompt
+const RECOVERY_DIRECTIVE_THRESHOLD = 10;   // after 10 empty turns, send directive recovery prompt
+const RECOVERY_RESET_THRESHOLD = 20;       // after 20 empty turns, full reset + fresh session
 const HUMAN_RESUME_DELAY_MS = 10_000;      // 10s after last human disconnects
 const NEEDS_INPUT_POLL_MS = 120_000;       // 2 min polling when blocked on questions
 const VERIFY_EVERY_N_TURNS = 10;           // run verify_command every N productive turns
@@ -517,6 +520,62 @@ ${result && result.value !== null ? `Current value: ${result.value}, Target: ${t
 Please continue working to meet the goal criteria. Update /workspace/.task.json status back to "running" if needed.`;
 }
 
+function buildRecoveryPrompt() {
+  const task = currentTask;
+  const shortMem = readFile('/workspace/SHORT_TERM_MEMORY.md') || '(empty)';
+  const longMem = readFile('/workspace/LONG_TERM_MEMORY.md') || '(empty)';
+
+  // Gather live system state
+  let tmuxOutput = '', psOutput = '', diskOutput = '';
+  try { tmuxOutput = execSync('tmux ls 2>/dev/null || echo "no tmux sessions"', { timeout: 5000 }).toString().trim(); } catch {}
+  try { psOutput = execSync('ps aux 2>/dev/null | grep -v grep | grep -vE "^USER|supervisor|gateway|node.*openclaw" | tail -20 || echo "no processes"', { timeout: 5000 }).toString().trim(); } catch {}
+  try { diskOutput = execSync('df -h /workspace 2>/dev/null | tail -1', { timeout: 5000 }).toString().trim(); } catch {}
+
+  let taskNote = '';
+  if (task && task.status === 'running') {
+    taskNote = `Task: ${task.name}\n${task.description || ''}`;
+  }
+
+  return `[${new Date().toISOString()}] RECOVERY CHECK — You have been unresponsive for ${consecutiveEmpty} turns. This is a fresh re-initialization.
+
+Project: ${PROJECT_NAME}
+${taskNote}
+
+## LIVE SYSTEM STATE (gathered just now)
+
+### tmux sessions
+\`\`\`
+${tmuxOutput}
+\`\`\`
+
+### Running processes
+\`\`\`
+${psOutput}
+\`\`\`
+
+### Disk usage
+\`\`\`
+${diskOutput}
+\`\`\`
+
+## Your Short-Term Memory
+${shortMem}
+
+## Your Long-Term Memory
+${longMem}
+
+## WHAT YOU MUST DO RIGHT NOW
+
+1. **Check each tmux session**: Run \`tmux capture-pane -t <session> -p | tail -20\` for EVERY session listed above to see their current output.
+2. **Report findings**: Tell me what each process is doing — is it running, stuck, completed, errored?
+3. **If processes finished**: Collect their output, check results, update memory files, and plan next steps.
+4. **If processes are still running**: Note their progress and estimate completion time.
+5. **If no processes are running**: Review your memory files and start the next task.
+6. **Update /workspace/SHORT_TERM_MEMORY.md** with current status BEFORE your turn ends.
+
+You MUST take action and produce output. Do not return an empty response.`;
+}
+
 // ── Turn management ─────────────────────────────────────────────
 function sendPrompt() {
   if (state === STATE.COMPLETED || state === STATE.NEEDS_INPUT) {
@@ -557,16 +616,37 @@ function sendPrompt() {
   }
 
   let prompt;
+  let promptType;
   if (!firstPromptSent) {
     prompt = buildFullPrompt();
     firstPromptSent = true;
+    promptType = 'full';
+  } else if (consecutiveEmpty >= RECOVERY_RESET_THRESHOLD) {
+    // Nuclear option: full reset after 20+ empty turns
+    log(`Recovery reset: ${consecutiveEmpty} consecutive empty turns — full re-initialization`);
+    firstPromptSent = false;
+    consecutiveEmpty = 0;
+    consecutiveIdle = 0;
+    prompt = buildFullPrompt();
+    firstPromptSent = true;
+    promptType = 'recovery-reset';
+  } else if (consecutiveEmpty >= RECOVERY_DIRECTIVE_THRESHOLD) {
+    // Strong recovery: directive prompt with live system state
+    prompt = buildRecoveryPrompt();
+    promptType = 'recovery-directive';
+  } else if (consecutiveEmpty >= RECOVERY_FULL_THRESHOLD) {
+    // Mild recovery: resend full context prompt
+    prompt = buildFullPrompt();
+    promptType = 'recovery-full';
   } else if (consecutiveIdle >= 3) {
     prompt = buildIdleCheckPrompt();
+    promptType = 'idle-check';
   } else {
     prompt = buildContinuationPrompt();
+    promptType = 'continuation';
   }
 
-  log(`=== Turn ${turnCount} === Sending prompt (${prompt.length} chars, idle=${consecutiveIdle}${currentTask ? ', task=' + currentTask.status : ''})`);
+  log(`=== Turn ${turnCount} === Sending ${promptType} prompt (${prompt.length} chars, empty=${consecutiveEmpty}, idle=${consecutiveIdle}${currentTask ? ', task=' + currentTask.status : ''})`);
   setState(STATE.PROMPTING);
 
   ws.send(JSON.stringify({ type: 'user_message', content: prompt }));
@@ -670,7 +750,7 @@ function onTurnEnd(result) {
       delay = MIN_DELAY_MS;
   }
 
-  log(`Turn ${turnCount}: ${classification} (${turnMsgCount} msgs, ${turnTextChars} chars, ${turnToolCount} tools) — next in ${Math.round(delay / 1000)}s`);
+  log(`Turn ${turnCount}: ${classification} (${turnMsgCount} msgs, ${turnTextChars} chars, ${turnToolCount} tools, empty=${consecutiveEmpty}) — next in ${Math.round(delay / 1000)}s`);
 
   // Broadcast updated task status
   if (currentTask) broadcastTaskStatus(currentTask);
