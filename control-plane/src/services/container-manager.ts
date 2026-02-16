@@ -1,6 +1,8 @@
 import * as dockerService from './docker.js';
 import { decrypt } from './secrets.js';
-import { getProject, updateProject, getSecrets } from '../db/index.js';
+import { getProject, updateProject, getSecrets, getWorkerByProject } from '../db/index.js';
+import { getInstanceMetadata } from './instance-metadata.js';
+import { getWorkerUrl } from './worker-provisioner.js';
 
 const GATEWAY_PORT = 18789;
 const HEALTH_TIMEOUT_MS = 120_000;
@@ -8,11 +10,11 @@ const HEALTH_INTERVAL_MS = 2_000;
 const DEFAULT_MEMORY_MB = parseInt(process.env.CONTAINER_MEMORY_MB || '230000');
 const DEFAULT_CPUS = parseInt(process.env.CONTAINER_CPUS || '30');
 
-export async function createProjectContainer(projectName: string): Promise<string> {
+/** Build the full env var map for a project container */
+export async function buildContainerEnv(projectName: string): Promise<Record<string, string>> {
   const project = getProject(projectName);
   if (!project) throw new Error(`Project "${projectName}" not found in database`);
 
-  // Build environment variables
   const env: Record<string, string> = {
     PROJECT_NAME: projectName,
     ANTHROPIC_API_KEY: decrypt(project.anthropic_api_key_enc),
@@ -34,7 +36,53 @@ export async function createProjectContainer(projectName: string): Promise<strin
     // no extra env
   }
 
-  // Create and start the container
+  // Inject instance metadata so agents know their hardware
+  const meta = await getInstanceMetadata();
+  env.INSTANCE_TYPE = meta.instanceType;
+  env.INSTANCE_CPUS = String(DEFAULT_CPUS);
+  env.INSTANCE_MEMORY_MB = String(DEFAULT_MEMORY_MB);
+  env.HOST_CPUS = String(meta.cpus);
+  env.HOST_MEMORY_MB = String(meta.memoryMb);
+
+  return env;
+}
+
+/**
+ * Create a project container — either locally or on a worker.
+ * If a ready worker exists for this project, delegates to the worker.
+ */
+export async function createProjectContainer(projectName: string): Promise<string> {
+  const env = await buildContainerEnv(projectName);
+
+  // Worker mode: delegate to remote worker
+  const workerUrl = getWorkerUrl(projectName);
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    try {
+      const res = await fetch(`${workerUrl}/container/create`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${worker.worker_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ env }),
+        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'unknown' })) as any;
+        throw new Error(err.error || `Worker returned ${res.status}`);
+      }
+
+      updateProject(projectName, { status: 'running' });
+      return worker.instance_id;
+    } catch (err: any) {
+      updateProject(projectName, { status: 'error' });
+      throw new Error(`Worker container creation failed: ${err.message}`);
+    }
+  }
+
+  // Local mode: create container on this host via Docker
   const containerId = await dockerService.createContainer({
     name: projectName,
     env,
@@ -44,7 +92,6 @@ export async function createProjectContainer(projectName: string): Promise<strin
 
   updateProject(projectName, { container_id: containerId, status: 'running' });
 
-  // Wait for the OpenClaw gateway to be healthy
   try {
     await waitForGateway(projectName);
   } catch (err) {
@@ -77,20 +124,242 @@ async function waitForGateway(projectName: string): Promise<void> {
 }
 
 export async function restartProjectContainer(projectName: string): Promise<void> {
-  // Destroy old container (but keep the volume)
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    // Worker mode: restart via worker agent
+    const worker = getWorkerByProject(projectName)!;
+    const env = await buildContainerEnv(projectName);
+
+    updateProject(projectName, { status: 'creating' });
+
+    const res = await fetch(`${workerUrl}/container/restart`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ env }),
+      signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
+    });
+
+    if (!res.ok) {
+      updateProject(projectName, { status: 'error' });
+      const err = await res.json().catch(() => ({ error: 'unknown' })) as any;
+      throw new Error(err.error || `Worker returned ${res.status}`);
+    }
+
+    updateProject(projectName, { status: 'running' });
+    return;
+  }
+
+  // Local mode
   await dockerService.removeContainer(projectName, false);
   updateProject(projectName, { status: 'creating' });
-
-  // Recreate with fresh env (picks up new secrets)
   await createProjectContainer(projectName);
 }
 
 export async function destroyProjectContainer(projectName: string): Promise<void> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    await fetch(`${workerUrl}/container/destroy`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ removeVolume: true }),
+      signal: AbortSignal.timeout(30_000),
+    }).catch(() => {});
+    return;
+  }
+
   await dockerService.removeContainer(projectName);
 }
 
 export async function getGatewayUrl(projectName: string): Promise<string | null> {
+  // Worker mode: proxy through worker agent's WS endpoint
+  const worker = getWorkerByProject(projectName);
+  if (worker && worker.status === 'ready') {
+    const ip = worker.private_ip || worker.public_ip;
+    if (ip) {
+      return `ws://${ip}:18800/gateway?token=${worker.worker_token}`;
+    }
+  }
+
+  // Local mode: direct to container
   const ip = await dockerService.getContainerIp(projectName);
   if (!ip) return null;
   return `ws://${ip}:${GATEWAY_PORT}`;
+}
+
+/**
+ * Execute a command inside the project container.
+ * Routes through worker if one exists.
+ */
+export async function execInProjectContainer(projectName: string, cmd: string[]): Promise<string> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/exec`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ cmd }),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'unknown' })) as any;
+      throw new Error(err.error || `Worker exec failed: ${res.status}`);
+    }
+
+    const result = await res.json() as any;
+    return result.output || '';
+  }
+
+  return dockerService.execInContainer(projectName, cmd);
+}
+
+/**
+ * Get container health info — routes through worker if one exists.
+ */
+export async function getContainerHealth(projectName: string): Promise<any | null> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    try {
+      const res = await fetch(`${workerUrl}/container/health`, {
+        headers: { 'Authorization': `Bearer ${worker.worker_token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) return await res.json();
+    } catch {}
+    return null;
+  }
+
+  // Local mode
+  const ip = await dockerService.getContainerIp(projectName);
+  if (!ip) return null;
+  try {
+    const res = await fetch(`http://${ip}:${GATEWAY_PORT}/health`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) return await res.json();
+  } catch {}
+  return null;
+}
+
+/**
+ * Control the supervisor process (pause/resume/stop/restart).
+ * Routes through worker if one exists, otherwise calls gateway HTTP endpoint directly.
+ */
+export async function controlSupervisor(projectName: string, action: string): Promise<{ ok: boolean; supervisorFound: boolean }> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/supervisor/control`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'unknown' })) as any;
+      throw new Error(err.error || `Worker supervisor control failed: ${res.status}`);
+    }
+    return await res.json() as any;
+  }
+
+  // Local mode: call gateway HTTP endpoint directly
+  const ip = await dockerService.getContainerIp(projectName);
+  if (!ip) throw new Error('Container not running');
+
+  const res = await fetch(`http://${ip}:${GATEWAY_PORT}/supervisor/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!res.ok) throw new Error(`Gateway returned ${res.status}`);
+  return await res.json() as any;
+}
+
+/**
+ * Get memory files from the project container.
+ */
+export async function getProjectMemory(projectName: string): Promise<{ short_term: string; long_term: string; plan: string }> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/memory`, {
+      headers: { 'Authorization': `Bearer ${worker.worker_token}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`Worker memory read failed: ${res.status}`);
+    return await res.json() as any;
+  }
+
+  const [short, long, plan] = await Promise.all([
+    dockerService.execInContainer(projectName, ['cat', '/workspace/SHORT_TERM_MEMORY.md']).catch(() => ''),
+    dockerService.execInContainer(projectName, ['cat', '/workspace/LONG_TERM_MEMORY.md']).catch(() => ''),
+    dockerService.execInContainer(projectName, ['cat', '/workspace/plan.md']).catch(() => ''),
+  ]);
+  return { short_term: short, long_term: long, plan };
+}
+
+/**
+ * Get supervisor logs from the project container.
+ */
+export async function getProjectLogs(projectName: string, lines: number): Promise<string> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/logs?lines=${lines}`, {
+      headers: { 'Authorization': `Bearer ${worker.worker_token}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) throw new Error(`Worker logs read failed: ${res.status}`);
+    const data = await res.json() as any;
+    return data.logs || '';
+  }
+
+  return dockerService.execInContainer(projectName, ['tail', '-n', String(lines), '/tmp/supervisor.log']);
+}
+
+/**
+ * Send a message to the agent, routing through worker if needed.
+ */
+export async function sendMessageToAgent(projectName: string, message: string): Promise<void> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/message`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ message }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) throw new Error(`Worker message send failed: ${res.status}`);
+    return;
+  }
+
+  // Local mode — handled by the existing route in projects.ts
+  throw new Error('Use local gateway for messaging');
 }

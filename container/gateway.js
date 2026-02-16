@@ -237,7 +237,59 @@ const server = http.createServer((req, res) => {
       humans: getHumanCount(),
       supervisorConnected: isSupervisorConnected(),
       task: taskStatus,
+      instance: {
+        type: process.env.INSTANCE_TYPE || 'unknown',
+        cpus: process.env.INSTANCE_CPUS || null,
+        memoryMb: process.env.INSTANCE_MEMORY_MB || null,
+        hostCpus: process.env.HOST_CPUS || null,
+        hostMemoryMb: process.env.HOST_MEMORY_MB || null,
+      },
     }));
+  } else if (req.url === '/send-message' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { message } = JSON.parse(body);
+        if (!message) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'message required' }));
+          return;
+        }
+        const delivered = sendToAgent(message);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, delivered, agentBusy }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+      }
+    });
+  } else if (req.url === '/supervisor/control' && req.method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const { action } = JSON.parse(body);
+        if (!action || !['pause', 'resume', 'stop', 'restart'].includes(action)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: false, error: 'action must be pause|resume|stop|restart' }));
+          return;
+        }
+        // Find supervisor client and send control message
+        let supervisorFound = false;
+        for (const client of clients) {
+          if (client.role === 'supervisor' && client.ws.readyState === WebSocket.OPEN) {
+            client.ws.send(JSON.stringify({ type: 'supervisor_control', action }));
+            supervisorFound = true;
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, supervisorFound }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'invalid JSON' }));
+      }
+    });
   } else {
     res.writeHead(404);
     res.end('Not found');

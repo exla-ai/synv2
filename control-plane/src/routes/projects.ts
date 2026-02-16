@@ -1,10 +1,20 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import WebSocket from 'ws';
 import * as db from '../db/index.js';
 import { encrypt } from '../services/secrets.js';
-import { createProjectContainer, destroyProjectContainer, restartProjectContainer } from '../services/container-manager.js';
-import { getContainerInfo, getContainerIp, execInContainer } from '../services/docker.js';
+import {
+  createProjectContainer,
+  destroyProjectContainer,
+  restartProjectContainer,
+  getContainerHealth,
+  execInProjectContainer,
+  getProjectMemory,
+  getProjectLogs,
+  sendMessageToAgent,
+  controlSupervisor,
+} from '../services/container-manager.js';
+import { getContainerInfo, getContainerIp } from '../services/docker.js';
+import { provisionWorker, terminateWorker, resizeWorker, getWorkerUrl } from '../services/worker-provisioner.js';
 
 const router = Router();
 
@@ -13,6 +23,7 @@ const CreateProjectSchema = z.object({
   anthropicApiKey: z.string().min(1),
   mcpServers: z.array(z.string()).optional(),
   env: z.record(z.string()).optional(),
+  instanceType: z.string().optional(),
 });
 
 // POST /api/projects — Create a new project
@@ -23,7 +34,7 @@ router.post('/', async (req, res) => {
     return;
   }
 
-  const { name, anthropicApiKey, mcpServers, env } = parsed.data;
+  const { name, anthropicApiKey, mcpServers, env, instanceType } = parsed.data;
 
   // Check if project already exists
   if (db.getProject(name)) {
@@ -39,11 +50,30 @@ router.post('/', async (req, res) => {
     anthropic_api_key_enc: encrypt(anthropicApiKey),
     mcp_servers: JSON.stringify(mcpServers || []),
     env_enc: encrypt(JSON.stringify(env || {})),
+    instance_type: instanceType || 't3.medium',
+    worker_instance_id: null,
     created_at: new Date().toISOString(),
   });
 
-  // Create container in background
   try {
+    // If instanceType is specified, provision a dedicated worker
+    if (instanceType) {
+      const instanceId = await provisionWorker(name, instanceType);
+
+      // Return immediately — worker provisioning happens in background
+      const project = db.getProject(name)!;
+      res.status(201).json({
+        name: project.name,
+        status: 'provisioning',
+        created_at: project.created_at,
+        instance_type: instanceType,
+        worker_instance_id: instanceId,
+        mcp_servers: JSON.parse(project.mcp_servers),
+      });
+      return;
+    }
+
+    // No instanceType — create container locally (legacy behavior)
     await createProjectContainer(name);
     const project = db.getProject(name)!;
     res.status(201).json({
@@ -63,7 +93,20 @@ router.get('/', async (_req, res) => {
   const projects = db.listProjects();
   const result = await Promise.all(
     projects.map(async (p) => {
-      // Sync status with Docker
+      // Check worker status if this project has a worker
+      const worker = db.getWorkerByProject(p.name);
+      if (worker) {
+        return {
+          name: p.name,
+          status: worker.status === 'ready' ? (p.status === 'running' ? 'running' : p.status) : worker.status,
+          created_at: p.created_at,
+          instance_type: p.instance_type,
+          worker_instance_id: worker.instance_id,
+          mcp_servers: JSON.parse(p.mcp_servers),
+        };
+      }
+
+      // Sync status with Docker for local containers
       const container = await getContainerInfo(p.name);
       const actualStatus = container ? container.status : p.status === 'creating' ? 'creating' : 'stopped';
       if (actualStatus !== p.status) {
@@ -73,6 +116,7 @@ router.get('/', async (_req, res) => {
         name: p.name,
         status: actualStatus,
         created_at: p.created_at,
+        instance_type: p.instance_type,
         mcp_servers: JSON.parse(p.mcp_servers),
       };
     })
@@ -88,22 +132,35 @@ router.get('/:name', async (req, res) => {
     return;
   }
 
-  const container = await getContainerInfo(project.name);
-  const status = container ? container.status : project.status;
+  const worker = db.getWorkerByProject(project.name);
 
-  // Fetch task status from gateway
+  // Get health/task info via worker or local container
   let task = null;
-  if (container && container.ip) {
-    try {
-      const healthRes = await fetch(`http://${container.ip}:18789/health`, {
-        signal: AbortSignal.timeout(3000),
-      });
-      if (healthRes.ok) {
-        const health = await healthRes.json() as any;
-        task = health.task || null;
-      }
-    } catch {
-      // Gateway not reachable — task remains null
+  let health = null;
+  let status = project.status;
+
+  if (worker) {
+    health = await getContainerHealth(project.name);
+    task = health?.task || null;
+    if (worker.status === 'ready' && project.status === 'running') {
+      status = 'running';
+    } else if (worker.status !== 'ready') {
+      status = worker.status;
+    }
+  } else {
+    const container = await getContainerInfo(project.name);
+    status = container ? container.status : project.status;
+
+    if (container && container.ip) {
+      try {
+        const healthRes = await fetch(`http://${container.ip}:18789/health`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        if (healthRes.ok) {
+          health = await healthRes.json() as any;
+          task = health.task || null;
+        }
+      } catch {}
     }
   }
 
@@ -112,8 +169,11 @@ router.get('/:name', async (req, res) => {
     status,
     created_at: project.created_at,
     container_id: project.container_id,
+    instance_type: project.instance_type,
+    worker_instance_id: project.worker_instance_id,
     mcp_servers: JSON.parse(project.mcp_servers),
     task,
+    instance: health?.instance || null,
   });
 });
 
@@ -127,6 +187,13 @@ router.delete('/:name', async (req, res) => {
 
   try {
     await destroyProjectContainer(project.name);
+
+    // Terminate worker if one exists
+    const worker = db.getWorkerByProject(project.name);
+    if (worker && worker.status !== 'terminated') {
+      await terminateWorker(worker.instance_id);
+    }
+
     db.deleteProject(project.name);
     res.json({ ok: true });
   } catch (err: any) {
@@ -147,6 +214,74 @@ router.post('/:name/restart', async (req, res) => {
     res.json({ ok: true, status: 'running' });
   } catch (err: any) {
     res.status(500).json({ error: 'restart_error', message: err.message });
+  }
+});
+
+// POST /api/projects/:name/resize — Resize a project's worker instance
+const ResizeSchema = z.object({
+  instanceType: z.string().min(1),
+});
+
+router.post('/:name/resize', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  const parsed = ResizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'validation_error', message: parsed.error.issues[0].message });
+    return;
+  }
+
+  const worker = db.getWorkerByProject(project.name);
+  if (!worker) {
+    res.status(400).json({ error: 'no_worker', message: 'Project does not have a dedicated worker. Destroy and recreate with --instance-type.' });
+    return;
+  }
+
+  try {
+    // Destroy container first (keeps workspace volume)
+    await destroyProjectContainer(project.name);
+    db.updateProject(project.name, { status: 'resizing' as any });
+
+    // Resize the EC2 instance (stop → change type → start)
+    await resizeWorker(worker.instance_id, parsed.data.instanceType);
+
+    // Recreate container on resized worker
+    await createProjectContainer(project.name);
+
+    res.json({ ok: true, instanceType: parsed.data.instanceType });
+  } catch (err: any) {
+    res.status(500).json({ error: 'resize_error', message: err.message });
+  }
+});
+
+// POST /api/projects/:name/exec — Execute a command in the project container
+const ExecSchema = z.object({
+  cmd: z.array(z.string()).min(1),
+  timeout: z.number().optional(),
+});
+
+router.post('/:name/exec', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  const parsed = ExecSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'validation_error', message: parsed.error.issues[0].message });
+    return;
+  }
+
+  try {
+    const output = await execInProjectContainer(project.name, parsed.data.cmd);
+    res.json({ ok: true, output });
+  } catch (err: any) {
+    res.status(500).json({ error: 'exec_error', message: err.message });
   }
 });
 
@@ -228,7 +363,7 @@ router.post('/:name/task', async (req, res) => {
 
   try {
     const json = JSON.stringify(taskDef, null, 2);
-    await execInContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
     res.status(201).json({ ok: true, task: taskDef });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -244,14 +379,27 @@ router.post('/:name/task/resume', async (req, res) => {
   }
 
   try {
-    // Read current task, update status, write back
-    const output = await execInContainer(project.name, ['cat', '/workspace/.task.json']);
-    const task = JSON.parse(output);
+    let output: string;
+    try {
+      output = await execInProjectContainer(project.name, ['cat', '/workspace/.task.json']);
+    } catch {
+      res.status(404).json({ error: 'no_task', message: "No task file found. Use 'supervisor stop' to control the supervisor directly." });
+      return;
+    }
+
+    let task: any;
+    try {
+      task = JSON.parse(output);
+    } catch {
+      res.status(422).json({ error: 'invalid_task', message: 'Task file contains invalid JSON' });
+      return;
+    }
+
     task.status = 'running';
     task.completed_at = null;
     task.completion_reason = null;
     const json = JSON.stringify(task, null, 2);
-    await execInContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -267,13 +415,27 @@ router.post('/:name/task/stop', async (req, res) => {
   }
 
   try {
-    const output = await execInContainer(project.name, ['cat', '/workspace/.task.json']);
-    const task = JSON.parse(output);
+    let output: string;
+    try {
+      output = await execInProjectContainer(project.name, ['cat', '/workspace/.task.json']);
+    } catch {
+      res.status(404).json({ error: 'no_task', message: "No task file found. Use 'supervisor stop' to control the supervisor directly." });
+      return;
+    }
+
+    let task: any;
+    try {
+      task = JSON.parse(output);
+    } catch {
+      res.status(422).json({ error: 'invalid_task', message: 'Task file contains invalid JSON' });
+      return;
+    }
+
     task.status = 'stopped';
     task.completed_at = new Date().toISOString();
     task.completion_reason = 'manual_stop';
     const json = JSON.stringify(task, null, 2);
-    await execInContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -302,8 +464,21 @@ router.post('/:name/task/respond', async (req, res) => {
   }
 
   try {
-    const output = await execInContainer(project.name, ['cat', '/workspace/.task.json']);
-    const task = JSON.parse(output);
+    let output: string;
+    try {
+      output = await execInProjectContainer(project.name, ['cat', '/workspace/.task.json']);
+    } catch {
+      res.status(404).json({ error: 'no_task', message: "No task file found. Use 'supervisor stop' to control the supervisor directly." });
+      return;
+    }
+
+    let task: any;
+    try {
+      task = JSON.parse(output);
+    } catch {
+      res.status(422).json({ error: 'invalid_task', message: 'Task file contains invalid JSON' });
+      return;
+    }
 
     if (!Array.isArray(task.questions)) {
       res.status(404).json({ error: 'not_found', message: 'No questions in task' });
@@ -320,14 +495,173 @@ router.post('/:name/task/respond', async (req, res) => {
     question.answered_at = new Date().toISOString();
 
     const json = JSON.stringify(task, null, 2);
-    await execInContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
   }
 });
 
-// POST /api/projects/:name/message — Send a message to the agent (fire-and-forget)
+// POST /api/projects/:name/directives — Set an operator directive
+const SetDirectiveSchema = z.object({
+  instruction: z.string().min(1),
+  id: z.string().optional(),
+  persistent: z.boolean().optional(),
+});
+
+router.post('/:name/directives', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  const parsed = SetDirectiveSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'validation_error', message: parsed.error.issues[0].message });
+    return;
+  }
+
+  try {
+    // Read existing directives
+    let directives: any[] = [];
+    try {
+      const raw = await execInProjectContainer(project.name, ['cat', '/workspace/.operator-directives.json']);
+      directives = JSON.parse(raw);
+      if (!Array.isArray(directives)) directives = [];
+    } catch {
+      // File doesn't exist or invalid — start fresh
+    }
+
+    const directive = {
+      id: parsed.data.id || `d_${Date.now()}`,
+      instruction: parsed.data.instruction,
+      persistent: parsed.data.persistent !== false,
+      created_at: new Date().toISOString(),
+    };
+
+    // Replace if same id exists, otherwise append
+    const idx = directives.findIndex((d: any) => d.id === directive.id);
+    if (idx >= 0) {
+      directives[idx] = directive;
+    } else {
+      directives.push(directive);
+    }
+
+    const json = JSON.stringify(directives, null, 2);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.operator-directives.json << 'DIREOF'\n${json}\nDIREOF`]);
+    res.status(201).json({ ok: true, directive });
+  } catch (err: any) {
+    res.status(500).json({ error: 'exec_error', message: err.message });
+  }
+});
+
+// GET /api/projects/:name/directives — List all directives
+router.get('/:name/directives', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  try {
+    let directives: any[] = [];
+    try {
+      const raw = await execInProjectContainer(project.name, ['cat', '/workspace/.operator-directives.json']);
+      directives = JSON.parse(raw);
+      if (!Array.isArray(directives)) directives = [];
+    } catch {
+      // No directives file
+    }
+    res.json({ directives });
+  } catch (err: any) {
+    res.status(500).json({ error: 'exec_error', message: err.message });
+  }
+});
+
+// DELETE /api/projects/:name/directives/:id — Remove a directive
+router.delete('/:name/directives/:id', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  try {
+    let directives: any[] = [];
+    try {
+      const raw = await execInProjectContainer(project.name, ['cat', '/workspace/.operator-directives.json']);
+      directives = JSON.parse(raw);
+      if (!Array.isArray(directives)) directives = [];
+    } catch {
+      res.status(404).json({ error: 'not_found', message: 'No directives file found' });
+      return;
+    }
+
+    const before = directives.length;
+    directives = directives.filter((d: any) => d.id !== req.params.id);
+
+    if (directives.length === before) {
+      res.status(404).json({ error: 'not_found', message: `Directive "${req.params.id}" not found` });
+      return;
+    }
+
+    const json = JSON.stringify(directives, null, 2);
+    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.operator-directives.json << 'DIREOF'\n${json}\nDIREOF`]);
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(500).json({ error: 'exec_error', message: err.message });
+  }
+});
+
+// POST /api/projects/:name/supervisor — Control the supervisor (pause/resume/stop/restart)
+const SupervisorControlSchema = z.object({
+  action: z.enum(['pause', 'resume', 'stop', 'restart']),
+});
+
+router.post('/:name/supervisor', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  const parsed = SupervisorControlSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'validation_error', message: parsed.error.issues[0].message });
+    return;
+  }
+
+  try {
+    const result = await controlSupervisor(project.name, parsed.data.action);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: 'supervisor_error', message: err.message });
+  }
+});
+
+// GET /api/projects/:name/processes — Get running processes, memory, disk, tmux
+router.get('/:name/processes', async (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  try {
+    const [processes, memory, disk, tmux] = await Promise.all([
+      execInProjectContainer(project.name, ['ps', 'aux', '--sort=-pcpu']).catch(() => ''),
+      execInProjectContainer(project.name, ['free', '-m']).catch(() => ''),
+      execInProjectContainer(project.name, ['df', '-h', '/workspace']).catch(() => ''),
+      execInProjectContainer(project.name, ['bash', '-c', 'tmux ls 2>/dev/null || echo "no tmux sessions"']).catch(() => ''),
+    ]);
+    res.json({ processes, memory, disk, tmux_sessions: tmux });
+  } catch (err: any) {
+    res.status(500).json({ error: 'exec_error', message: err.message });
+  }
+});
+
+// POST /api/projects/:name/message — Send a message to the agent
 const MessageSchema = z.object({
   message: z.string().min(1),
 });
@@ -345,6 +679,19 @@ router.post('/:name/message', async (req, res) => {
     return;
   }
 
+  // Try worker-based messaging first
+  const workerUrl = getWorkerUrl(project.name);
+  if (workerUrl) {
+    try {
+      await sendMessageToAgent(project.name, parsed.data.message);
+      res.json({ ok: true, sent: true });
+    } catch (err: any) {
+      res.status(503).json({ error: 'gateway_error', message: err.message });
+    }
+    return;
+  }
+
+  // Local mode: use gateway's HTTP send-message endpoint for delivery confirmation
   const ip = await getContainerIp(project.name);
   if (!ip) {
     res.status(503).json({ error: 'container_unavailable', message: 'Container not running' });
@@ -352,26 +699,14 @@ router.post('/:name/message', async (req, res) => {
   }
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(`ws://${ip}:18789`);
-      const timeout = setTimeout(() => {
-        ws.close();
-        reject(new Error('Gateway connection timeout'));
-      }, 5000);
-
-      ws.on('open', () => {
-        ws.send(JSON.stringify({ type: 'user_message', content: parsed.data.message }));
-        clearTimeout(timeout);
-        ws.close();
-        resolve();
-      });
-
-      ws.on('error', (err) => {
-        clearTimeout(timeout);
-        reject(err);
-      });
+    const gwRes = await fetch(`http://${ip}:18789/send-message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: parsed.data.message }),
+      signal: AbortSignal.timeout(5000),
     });
-    res.json({ ok: true, sent: true });
+    const gwData = await gwRes.json() as any;
+    res.json({ ok: true, delivered: gwData.delivered, agentBusy: gwData.agentBusy });
   } catch (err: any) {
     res.status(503).json({ error: 'gateway_error', message: err.message });
   }
@@ -386,12 +721,8 @@ router.get('/:name/memory', async (req, res) => {
   }
 
   try {
-    const [short, long, plan] = await Promise.all([
-      execInContainer(project.name, ['cat', '/workspace/SHORT_TERM_MEMORY.md']).catch(() => ''),
-      execInContainer(project.name, ['cat', '/workspace/LONG_TERM_MEMORY.md']).catch(() => ''),
-      execInContainer(project.name, ['cat', '/workspace/plan.md']).catch(() => ''),
-    ]);
-    res.json({ short_term: short, long_term: long, plan });
+    const memory = await getProjectMemory(project.name);
+    res.json(memory);
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
   }
@@ -408,11 +739,52 @@ router.get('/:name/logs', async (req, res) => {
   const lines = parseInt(req.query.lines as string) || 100;
 
   try {
-    const output = await execInContainer(project.name, ['tail', '-n', String(lines), '/tmp/supervisor.log']);
-    res.json({ logs: output });
+    const logs = await getProjectLogs(project.name, lines);
+    res.json({ logs });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
   }
+});
+
+// Worker heartbeat endpoint
+router.post('/:name/heartbeat', (req, res) => {
+  // Workers call this periodically — find worker by project name and update heartbeat
+  const worker = db.getWorkerByProject(req.params.name);
+  if (!worker) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  db.updateWorker(worker.instance_id, { last_heartbeat: new Date().toISOString() });
+  res.json({ ok: true });
+});
+
+// GET /api/projects/:name/worker — Get worker details
+router.get('/:name/worker', (req, res) => {
+  const project = db.getProject(req.params.name);
+  if (!project) {
+    res.status(404).json({ error: 'not_found', message: 'Project not found' });
+    return;
+  }
+
+  const worker = db.getWorkerByProject(project.name);
+  if (!worker) {
+    res.json({ worker: null });
+    return;
+  }
+
+  res.json({
+    worker: {
+      instance_id: worker.instance_id,
+      instance_type: worker.instance_type,
+      status: worker.status,
+      private_ip: worker.private_ip,
+      region: worker.region,
+      availability_zone: worker.availability_zone,
+      created_at: worker.created_at,
+      last_heartbeat: worker.last_heartbeat,
+    },
+  });
 });
 
 // Secrets CRUD

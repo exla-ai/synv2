@@ -30,7 +30,7 @@ export class ApiClient {
     return res.json() as Promise<T>;
   }
 
-  async createProject(name: string, opts: { anthropicApiKey: string; mcpServers?: string[]; env?: Record<string, string> }): Promise<Project> {
+  async createProject(name: string, opts: { anthropicApiKey: string; mcpServers?: string[]; env?: Record<string, string>; instanceType?: string }): Promise<Project> {
     return this.request('POST', '/api/projects', { name, ...opts });
   }
 
@@ -72,6 +72,34 @@ export class ApiClient {
 
   async restartProject(name: string): Promise<void> {
     await this.request('POST', `/api/projects/${encodeURIComponent(name)}/restart`);
+  }
+
+  async resizeProject(name: string, instanceType: string): Promise<{ ok: boolean; instanceType: string }> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(name)}/resize`, { instanceType });
+  }
+
+  async exec(projectName: string, cmd: string[]): Promise<{ ok: boolean; output: string }> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/exec`, { cmd });
+  }
+
+  async getProcesses(projectName: string): Promise<{ processes: string; memory: string; disk: string; tmux_sessions: string }> {
+    return this.request('GET', `/api/projects/${encodeURIComponent(projectName)}/processes`);
+  }
+
+  async controlSupervisor(projectName: string, action: string): Promise<{ ok: boolean; supervisorFound: boolean }> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/supervisor`, { action });
+  }
+
+  async setDirective(projectName: string, instruction: string, id?: string): Promise<any> {
+    return this.request('POST', `/api/projects/${encodeURIComponent(projectName)}/directives`, { instruction, id });
+  }
+
+  async listDirectives(projectName: string): Promise<{ directives: any[] }> {
+    return this.request('GET', `/api/projects/${encodeURIComponent(projectName)}/directives`);
+  }
+
+  async deleteDirective(projectName: string, id: string): Promise<void> {
+    await this.request('DELETE', `/api/projects/${encodeURIComponent(projectName)}/directives/${encodeURIComponent(id)}`);
   }
 
   async createTask(projectName: string, taskDef: Record<string, unknown>): Promise<unknown> {

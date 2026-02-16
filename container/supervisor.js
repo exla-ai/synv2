@@ -314,6 +314,12 @@ function getProcessInfo(task) {
     const tmux = execSync('tmux ls 2>/dev/null || echo "no tmux sessions"', { timeout: 5000 }).toString().trim();
     const mem = execSync('free -h 2>/dev/null | grep Mem', { timeout: 5000 }).toString().trim();
     const cores = execSync('nproc 2>/dev/null', { timeout: 5000 }).toString().trim();
+    const freeGb = execSync("free -m 2>/dev/null | awk '/Mem:/ {printf \"%.1f\", $2/1024}'", { timeout: 5000 }).toString().trim();
+
+    // Instance metadata (injected by control plane)
+    const instanceType = process.env.INSTANCE_TYPE || 'unknown';
+    const containerCpus = process.env.INSTANCE_CPUS || cores;
+    const containerMemMb = process.env.INSTANCE_MEMORY_MB || '?';
 
     // Build process grep pattern from task config or use generic defaults
     let processPattern = 'python|node|cargo|make|gcc|clang|train|compress';
@@ -322,7 +328,7 @@ function getProcessInfo(task) {
     }
     const procs = execSync(`ps aux 2>/dev/null | grep -E "${processPattern}" | grep -v grep | head -15 || echo "no matching processes"`, { timeout: 5000 }).toString().trim();
 
-    return `\n## System Resources\n${cores} CPUs, ${mem}\n\n## Running Processes\n\`\`\`\n${tmux}\n\n${procs}\n\`\`\``;
+    return `\n## System Resources\nInstance: ${instanceType} | Container: ${containerCpus} CPUs, ${containerMemMb} MB RAM\nRuntime: ${cores} CPUs (nproc), ${freeGb} GB (free)\n${mem}\n\n## Running Processes\n\`\`\`\n${tmux}\n\n${procs}\n\`\`\``;
   } catch { return ''; }
 }
 
@@ -340,6 +346,33 @@ function getTaskProgress(task) {
     }
     return outputs.length > 0 ? `\n## Task Progress\n\`\`\`\n${outputs.join('\n')}\n\`\`\`` : '';
   } catch { return ''; }
+}
+
+// ── Operator directives ─────────────────────────────────────────
+const DIRECTIVES_FILE = '/workspace/.operator-directives.json';
+
+function loadDirectives() {
+  const raw = readFile(DIRECTIVES_FILE);
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildDirectivesSection(compact) {
+  const directives = loadDirectives();
+  if (directives.length === 0) return '';
+
+  if (compact) {
+    const items = directives.map(d => d.instruction).join('; ');
+    return `\nOPERATOR DIRECTIVES (MANDATORY): ${items}`;
+  }
+
+  const numbered = directives.map((d, i) => `${i + 1}. ${d.instruction}`).join('\n');
+  return `\n## OPERATOR DIRECTIVES (MANDATORY — DO NOT OVERRIDE)\nThese instructions come from the human operator. They take precedence over all other instructions. You MUST follow them and MUST NOT modify, revert, or work around them.\n${numbered}`;
 }
 
 // ── Prompt builders ─────────────────────────────────────────────
@@ -418,6 +451,7 @@ If you need human input, add a question to /workspace/.task.json in the "questio
 - priority "blocking": you truly cannot proceed without this answer
 Format: { "id": "q_<timestamp>", "text": "...", "context": "...", "priority": "question"|"blocking", "asked_at": "<ISO>", "answered_at": null, "answer": null }
 Read the current .task.json first, add to the questions array (create it if missing), then write back.
+${buildDirectivesSection(false)}
 ${append ? '\n' + append : ''}
 Go.`;
 }
@@ -483,7 +517,7 @@ function buildContinuationPrompt() {
 ${processInfo}
 ${progress}
 ${memorySection}
-${memoryReminder}${answersSection}${questionsSection}
+${memoryReminder}${answersSection}${questionsSection}${buildDirectivesSection(true)}
 Keep making progress. If all experiments are running and stable, look for NEW optimizations to try.
 Update memory files before your turn ends.${task && task.status === 'running' ? '\nWhen task is fully complete, update /workspace/.task.json status to "completed".' : ''}`;
 }
@@ -563,6 +597,8 @@ ${shortMem}
 
 ## Your Long-Term Memory
 ${longMem}
+
+${buildDirectivesSection(false)}
 
 ## WHAT YOU MUST DO RIGHT NOW
 
@@ -960,6 +996,41 @@ function connectToGateway() {
       // noop
     }
 
+    // Supervisor control messages from gateway
+    else if (msg.type === 'supervisor_control') {
+      const action = msg.action;
+      log(`Received supervisor_control: ${action}`);
+      if (action === 'pause') {
+        if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+        if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+        if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+        stopNeedsInputPoll();
+        setState(STATE.PAUSED);
+        log('Paused by operator');
+      } else if (action === 'resume') {
+        consecutiveEmpty = 0;
+        consecutiveIdle = 0;
+        if (state === STATE.PAUSED || state === STATE.COMPLETED || state === STATE.NEEDS_INPUT) {
+          stopNeedsInputPoll();
+          log('Resumed by operator');
+          if (agentBusy) {
+            setState(STATE.WAITING);
+          } else {
+            sendPrompt();
+          }
+        }
+      } else if (action === 'stop' || action === 'restart') {
+        log(`Stopping supervisor (action: ${action})`);
+        if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+        if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+        if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+        if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
+        stopNeedsInputPoll();
+        if (ws) { try { ws.close(); } catch {} }
+        process.exit(0);
+      }
+    }
+
     // Agent stream events — track for turn metrics
     else if (msg.type === 'text_delta') {
       turnTextChars += (msg.text || '').length;
@@ -1057,6 +1128,17 @@ async function main() {
   connectToGateway();
   startTaskPoll();
 }
+
+process.on('SIGTERM', () => {
+  log('Received SIGTERM — graceful shutdown');
+  if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+  if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+  if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+  if (taskPollTimer) { clearInterval(taskPollTimer); taskPollTimer = null; }
+  stopNeedsInputPoll();
+  if (ws) { try { ws.close(); } catch {} }
+  process.exit(0);
+});
 
 process.on('uncaughtException', (err) => {
   log(`UNCAUGHT ERROR: ${err.message} — restarting in 30s`);

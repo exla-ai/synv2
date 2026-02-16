@@ -63,6 +63,30 @@ export class ApiClient {
     });
   }
 
+  async exec(name: string, cmd: string[]): Promise<any> {
+    return this.request('POST', `/api/projects/${this.enc(name)}/exec`, { cmd });
+  }
+
+  async getProcesses(name: string): Promise<any> {
+    return this.request('GET', `/api/projects/${this.enc(name)}/processes`);
+  }
+
+  async controlSupervisor(name: string, action: string): Promise<any> {
+    return this.request('POST', `/api/projects/${this.enc(name)}/supervisor`, { action });
+  }
+
+  async setDirective(name: string, instruction: string, id?: string): Promise<any> {
+    return this.request('POST', `/api/projects/${this.enc(name)}/directives`, { instruction, id });
+  }
+
+  async listDirectives(name: string): Promise<any> {
+    return this.request('GET', `/api/projects/${this.enc(name)}/directives`);
+  }
+
+  async deleteDirective(name: string, id: string): Promise<any> {
+    return this.request('DELETE', `/api/projects/${this.enc(name)}/directives/${this.enc(id)}`);
+  }
+
   async getMemory(name: string): Promise<any> {
     return this.request('GET', `/api/projects/${this.enc(name)}/memory`);
   }

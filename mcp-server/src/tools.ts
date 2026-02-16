@@ -123,6 +123,79 @@ export function registerTools(server: McpServer, config: Synv2Config) {
   );
 
   server.tool(
+    'set_operator_directive',
+    'Set a persistent operator directive for a project. Directives are injected into every supervisor prompt and the agent is told they are mandatory.',
+    {
+      project: z.string().describe('Project name'),
+      instruction: z.string().describe('The directive instruction (e.g. "keep MAX_PARALLEL=40, do not change it")'),
+      id: z.string().optional().describe('Directive ID (auto-generated if omitted)'),
+    },
+    async ({ project, instruction, id }) => {
+      const result = await api.setDirective(project, instruction, id);
+      return text(result);
+    }
+  );
+
+  server.tool(
+    'list_operator_directives',
+    'List all operator directives for a project.',
+    { project: z.string().describe('Project name') },
+    async ({ project }) => {
+      const result = await api.listDirectives(project);
+      return text(result);
+    }
+  );
+
+  server.tool(
+    'remove_operator_directive',
+    'Remove an operator directive by ID.',
+    {
+      project: z.string().describe('Project name'),
+      directive_id: z.string().describe('ID of the directive to remove'),
+    },
+    async ({ project, directive_id }) => {
+      const result = await api.deleteDirective(project, directive_id);
+      return text(result);
+    }
+  );
+
+  server.tool(
+    'control_supervisor',
+    'Control the supervisor process for a project. Actions: pause (stop autonomous prompts), resume (restart prompting), stop (kill supervisor), restart (kill and let entrypoint restart it).',
+    {
+      project: z.string().describe('Project name'),
+      action: z.enum(['pause', 'resume', 'stop', 'restart']).describe('Control action'),
+    },
+    async ({ project, action }) => {
+      const result = await api.controlSupervisor(project, action);
+      return text(result);
+    }
+  );
+
+  server.tool(
+    'get_container_processes',
+    'Get running processes, memory usage, disk usage, and tmux sessions for a project container.',
+    { project: z.string().describe('Project name') },
+    async ({ project }) => {
+      const result = await api.getProcesses(project);
+      return text(result);
+    }
+  );
+
+  server.tool(
+    'exec_in_container',
+    'Execute a command inside a project\'s container. Returns stdout. Use for debugging, inspecting processes, or running one-off commands.',
+    {
+      project: z.string().describe('Project name'),
+      cmd: z.array(z.string()).describe('Command and arguments (e.g. ["ps", "aux"])'),
+    },
+    async ({ project, cmd }) => {
+      const result = await api.exec(project, cmd);
+      return text(result);
+    }
+  );
+
+  server.tool(
     'get_agent_memory',
     'Read the agent\'s memory files (SHORT_TERM_MEMORY.md, LONG_TERM_MEMORY.md, plan.md). These persist across context compactions and show what the agent knows/is planning.',
     { project: z.string().describe('Project name') },

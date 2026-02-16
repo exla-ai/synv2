@@ -7,6 +7,11 @@ import { destroyCommand } from './commands/destroy.js';
 import { statusCommand } from './commands/status.js';
 import { secretsSetCommand, secretsListCommand, secretsDeleteCommand } from './commands/secrets.js';
 import { restartCommand } from './commands/restart.js';
+import { resizeCommand } from './commands/resize.js';
+import { execCommand } from './commands/exec.js';
+import { psCommand } from './commands/ps.js';
+import { supervisorPauseCommand, supervisorResumeCommand, supervisorStopCommand, supervisorRestartCommand } from './commands/supervisor.js';
+import { directiveSetCommand, directiveListCommand, directiveDeleteCommand } from './commands/directives.js';
 import { taskStartCommand, taskStatusCommand, taskStopCommand, taskResumeCommand, taskRespondCommand } from './commands/task.js';
 
 const program = new Command();
@@ -32,6 +37,7 @@ program
   .description('Create a new project')
   .option('--api-key <key>', 'Anthropic API key (or set ANTHROPIC_API_KEY)')
   .option('--mcp-servers <servers>', 'Comma-separated MCP servers to enable')
+  .option('--instance-type <type>', 'EC2 instance type for dedicated worker (e.g. c7i.12xlarge)')
   .action(initCommand);
 
 program
@@ -51,9 +57,72 @@ program
   .action(restartCommand);
 
 program
+  .command('resize <name> <instance-type>')
+  .description('Resize a project worker to a different EC2 instance type')
+  .action(resizeCommand);
+
+program
+  .command('exec <name> [cmd...]')
+  .description('Execute a command in a project container')
+  .action(execCommand);
+
+program
+  .command('ps <name>')
+  .description('Show running processes, memory, disk, and tmux sessions')
+  .action(psCommand);
+
+program
   .command('status')
   .description('Show infrastructure health and project status')
   .action(statusCommand);
+
+// Supervisor control
+const supervisor = program
+  .command('supervisor')
+  .description('Control the supervisor process');
+
+supervisor
+  .command('pause <project>')
+  .description('Pause the supervisor (stop autonomous prompts)')
+  .action(supervisorPauseCommand);
+
+supervisor
+  .command('resume <project>')
+  .description('Resume the supervisor')
+  .action(supervisorResumeCommand);
+
+supervisor
+  .command('stop <project>')
+  .description('Stop the supervisor process')
+  .action(supervisorStopCommand);
+
+supervisor
+  .command('restart <project>')
+  .description('Restart the supervisor process')
+  .action(supervisorRestartCommand);
+
+// Operator directives
+const directive = program
+  .command('directive')
+  .description('Manage operator directives (persistent instructions for the agent)');
+
+directive
+  .command('set <project> <instruction>')
+  .description('Set an operator directive')
+  .option('--id <id>', 'Directive ID (auto-generated if omitted)')
+  .action(directiveSetCommand);
+
+directive
+  .command('list <project>')
+  .alias('ls')
+  .description('List all directives')
+  .action(directiveListCommand);
+
+directive
+  .command('delete <project> <id>')
+  .alias('rm')
+  .description('Delete a directive')
+  .action(directiveDeleteCommand);
 
 // Secrets management
 const secrets = program
