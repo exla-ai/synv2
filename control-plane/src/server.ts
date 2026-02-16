@@ -5,13 +5,30 @@ import { requireAuth, authenticateWsToken } from './routes/auth.js';
 import { projectsRouter } from './routes/projects.js';
 import { statusRouter } from './routes/status.js';
 import { handleUpgrade } from './services/openclaw-proxy.js';
-import { getDb } from './db/index.js';
+import { getDb, getWorkerByProject, updateWorker } from './db/index.js';
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 // Health check (no auth)
 app.get('/health', (_req, res) => res.json({ ok: true }));
+
+// Worker heartbeat endpoint (authenticated by worker token, not admin token)
+app.post('/api/workers/:projectName/heartbeat', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'unauthorized' });
+    return;
+  }
+  const token = auth.slice(7);
+  const worker = getWorkerByProject(req.params.projectName);
+  if (!worker || worker.worker_token !== token) {
+    res.status(403).json({ error: 'forbidden' });
+    return;
+  }
+  updateWorker(worker.instance_id, { last_heartbeat: new Date().toISOString() });
+  res.json({ ok: true });
+});
 
 // All API routes require auth
 app.use('/api', requireAuth);

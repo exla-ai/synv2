@@ -9,9 +9,11 @@ export interface Synv2Config {
 
 export interface Project {
   name: string;
-  status: 'running' | 'stopped' | 'creating' | 'error';
+  status: 'running' | 'stopped' | 'creating' | 'error' | 'provisioning' | 'bootstrapping' | 'resizing';
   created_at: string;
   container_id?: string;
+  instance_type?: string;
+  worker_instance_id?: string;
   mcp_servers?: string[];
 }
 

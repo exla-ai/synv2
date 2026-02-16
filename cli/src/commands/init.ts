@@ -14,7 +14,7 @@ function ask(question: string): Promise<string> {
 
 const ALL_MCP_SERVERS = ['filesystem', 'fetch', 'memory', 'github', 'brave-search', 'puppeteer', 'postgres', 'exa'];
 
-export async function initCommand(name: string, opts: { apiKey?: string; mcpServers?: string; interactive?: boolean }): Promise<void> {
+export async function initCommand(name: string, opts: { apiKey?: string; mcpServers?: string; interactive?: boolean; instanceType?: string }): Promise<void> {
   const config = requireConfig();
   const api = new ApiClient(config);
 
@@ -29,15 +29,26 @@ export async function initCommand(name: string, opts: { apiKey?: string; mcpServ
     : ALL_MCP_SERVERS;
 
   console.log(`Creating project "${name}"...`);
+  if (opts.instanceType) {
+    console.log(`Instance type: ${opts.instanceType} (dedicated worker)`);
+  }
   console.log(`MCP servers: ${mcpServers.join(', ')}`);
 
   try {
     const project = await api.createProject(name, {
       anthropicApiKey,
       mcpServers,
+      instanceType: opts.instanceType,
     });
 
     console.log(`\nProject "${project.name}" created (${project.status}).`);
+    if (project.instance_type) {
+      console.log(`Instance: ${project.instance_type}${project.worker_instance_id ? ` (${project.worker_instance_id})` : ''}`);
+    }
+    if (project.status === 'provisioning') {
+      console.log('Worker instance is provisioning... This takes ~3 minutes.');
+      console.log(`Check status with: synv2 status`);
+    }
 
     // Prompt for secrets
     console.log('\nSet up service tokens (press Enter to skip any):');
