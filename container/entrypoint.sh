@@ -38,9 +38,10 @@ echo "  clang:    $(clang --version 2>/dev/null | head -1 || echo 'not found')"
 # ── Configure OpenClaw ──────────────────────────────────────────
 mkdir -p /home/app/.openclaw
 
-# Generate gateway auth token
-GATEWAY_TOKEN="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)"
-export OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN"
+# Generate gateway auth password (password auth grants full operator.write scope)
+GATEWAY_PASSWORD="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p)"
+export OPENCLAW_GATEWAY_PASSWORD="$GATEWAY_PASSWORD"
+export OPENCLAW_GATEWAY_TOKEN=""
 export OPENCLAW_GATEWAY_PORT="18790"
 
 echo "Configuring OpenClaw..."
@@ -51,7 +52,7 @@ openclaw onboard \
   --workspace "/workspace" \
   --gateway-port 18790 \
   --gateway-bind lan \
-  --gateway-auth token \
+  --gateway-auth password \
   --skip-daemon \
   2>&1 || echo "Onboard completed (or already configured)"
 
@@ -92,46 +93,120 @@ cat > /home/app/.openclaw/exec-approvals.json << 'APPROVALS_EOF'
 APPROVALS_EOF
 echo "Exec approvals configured (full autonomous mode)"
 
-# ── Start OpenClaw gateway in background on :18790 ──────────────
-echo "Starting OpenClaw gateway on :18790..."
-openclaw gateway --port 18790 --bind lan --token "$GATEWAY_TOKEN" --allow-unconfigured &
-OPENCLAW_PID=$!
+# ── Watchdog logging ──────────────────────────────────────────────
+WATCHDOG_LOG="/workspace/.watchdog.log"
+touch "$WATCHDOG_LOG" 2>/dev/null || true
 
-# Wait for OpenClaw to be ready (can take 30-60s on first boot)
-for i in $(seq 1 60); do
-  if curl -sf http://127.0.0.1:18790/health >/dev/null 2>&1; then
-    echo "OpenClaw gateway ready (${i}s)"
-    break
-  fi
-  sleep 1
-done
+watchdog_log() {
+  local msg="$1"
+  local line="[$(date -Iseconds)] $msg"
+  echo "$line"
+  echo "$line" >> "$WATCHDOG_LOG" 2>/dev/null || true
+}
 
-# ── Start synv2 bridge gateway on :18789 in background ───────────
-echo "Starting bridge gateway on :18789..."
-node /home/app/gateway.js &
-BRIDGE_PID=$!
+wait_for_http() {
+  local name="$1"
+  local url="$2"
+  local attempts="$3"
+  local delay="${4:-1}"
 
-# Wait for bridge to be ready
-for i in $(seq 1 15); do
-  if curl -sf http://127.0.0.1:18789/health >/dev/null 2>&1; then
-    echo "Bridge gateway ready"
-    break
-  fi
-  sleep 1
-done
+  for i in $(seq 1 "$attempts"); do
+    if curl -sf "$url" >/dev/null 2>&1; then
+      watchdog_log "$name ready (${i}s)"
+      return 0
+    fi
+    sleep "$delay"
+  done
 
-# ── Start supervisor loop (keeps agent working) ──────────────────
+  watchdog_log "$name did not become healthy within $((attempts * delay))s"
+  return 1
+}
+
+OPENCLAW_PID=""
+BRIDGE_PID=""
 SUPERVISOR_PID=""
-if [ "${SUPERVISOR_ENABLED:-true}" = "true" ]; then
-  echo "Starting supervisor loop..."
-  node /home/app/supervisor.js &
-  SUPERVISOR_PID=$!
-else
-  echo "Supervisor disabled (SUPERVISOR_ENABLED=${SUPERVISOR_ENABLED:-})"
-fi
 
-echo "All services started (OpenClaw=$OPENCLAW_PID, Bridge=$BRIDGE_PID, Supervisor=${SUPERVISOR_PID:-none})"
+start_openclaw() {
+  watchdog_log "Starting OpenClaw gateway on :18790..."
+  openclaw gateway --port 18790 --bind lan --auth password --password "$GATEWAY_PASSWORD" --allow-unconfigured &
+  OPENCLAW_PID=$!
+  wait_for_http "OpenClaw gateway" "http://127.0.0.1:18790/health" 60 1 || true
+}
 
-# ── Wait for any child to exit ────────────────────────────────────
-wait -n $OPENCLAW_PID $BRIDGE_PID 2>/dev/null || true
-echo "A service exited. Shutting down..."
+start_bridge() {
+  watchdog_log "Starting bridge gateway on :18789..."
+  node /home/app/gateway.js &
+  BRIDGE_PID=$!
+  wait_for_http "Bridge gateway" "http://127.0.0.1:18789/health" 20 1 || true
+}
+
+start_supervisor() {
+  if [ "${SUPERVISOR_ENABLED:-true}" = "true" ]; then
+    watchdog_log "Starting supervisor loop..."
+    node /home/app/supervisor.js &
+    SUPERVISOR_PID=$!
+  else
+    SUPERVISOR_PID=""
+    watchdog_log "Supervisor disabled (SUPERVISOR_ENABLED=${SUPERVISOR_ENABLED:-})"
+  fi
+}
+
+shutdown_children() {
+  watchdog_log "Stopping child services..."
+  for pid in "${SUPERVISOR_PID:-}" "${BRIDGE_PID:-}" "${OPENCLAW_PID:-}"; do
+    if [ -n "${pid}" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+  wait || true
+}
+
+trap 'shutdown_children; exit 0' SIGTERM SIGINT
+
+start_openclaw
+start_bridge
+start_supervisor
+
+watchdog_log "All services started (OpenClaw=$OPENCLAW_PID, Bridge=$BRIDGE_PID, Supervisor=${SUPERVISOR_PID:-none})"
+
+# ── Process watchdog loop (self-healing, container stays up) ─────
+BRIDGE_HEALTH_FAILS=0
+while true; do
+  if [ -z "${OPENCLAW_PID}" ] || ! kill -0 "$OPENCLAW_PID" 2>/dev/null; then
+    watchdog_log "OpenClaw process exited. Restarting..."
+    start_openclaw
+  fi
+
+  BRIDGE_NEEDS_RESTART="false"
+  if [ -z "${BRIDGE_PID}" ] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    watchdog_log "Bridge process exited. Restarting..."
+    BRIDGE_NEEDS_RESTART="true"
+  elif ! curl -sf http://127.0.0.1:18789/health >/dev/null 2>&1; then
+    BRIDGE_HEALTH_FAILS=$((BRIDGE_HEALTH_FAILS + 1))
+    watchdog_log "Bridge HTTP health check failed (${BRIDGE_HEALTH_FAILS}/2)"
+    if [ "$BRIDGE_HEALTH_FAILS" -ge 2 ]; then
+      watchdog_log "Bridge health endpoint is unhealthy. Restarting bridge..."
+      BRIDGE_NEEDS_RESTART="true"
+    fi
+  else
+    BRIDGE_HEALTH_FAILS=0
+  fi
+
+  if [ "$BRIDGE_NEEDS_RESTART" = "true" ]; then
+    BRIDGE_HEALTH_FAILS=0
+    if [ -n "${BRIDGE_PID}" ] && kill -0 "$BRIDGE_PID" 2>/dev/null; then
+      kill "$BRIDGE_PID" 2>/dev/null || true
+      wait "$BRIDGE_PID" 2>/dev/null || true
+    fi
+    start_bridge
+  fi
+
+  if [ "${SUPERVISOR_ENABLED:-true}" = "true" ]; then
+    if [ -z "${SUPERVISOR_PID}" ] || ! kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+      watchdog_log "Supervisor process exited. Restarting..."
+      start_supervisor
+    fi
+  fi
+
+  sleep 5
+done

@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const PORT = parseInt(process.env.GATEWAY_PORT || '18789');
 const OPENCLAW_PORT = parseInt(process.env.OPENCLAW_GATEWAY_PORT || '18790');
 const OPENCLAW_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || '';
+const OPENCLAW_PASSWORD = process.env.OPENCLAW_GATEWAY_PASSWORD || '';
 const PROJECT_NAME = process.env.PROJECT_NAME || 'project';
 
 const SESSION_KEY = `main:webchat:synv2-${PROJECT_NAME}`;
@@ -119,7 +120,7 @@ function connectToOpenClaw() {
             role: 'operator',
             scopes: ['operator.read', 'operator.write'],
             caps: [],
-            auth: { token: OPENCLAW_TOKEN },
+            auth: OPENCLAW_PASSWORD ? { password: OPENCLAW_PASSWORD } : { token: OPENCLAW_TOKEN },
             userAgent: 'synv2-gateway/0.1.0',
           },
         }));
