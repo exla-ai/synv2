@@ -296,7 +296,9 @@ const server = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ error: 'cmd must be an array of strings' }));
         return;
       }
-      const output = execInContainer(cmd.join(' '));
+      // Shell-escape each argument to prevent metacharacter interpretation
+      const escaped = cmd.map(arg => `'${arg.replace(/'/g, "'\\''")}'`).join(' ');
+      const output = execInContainer(escaped);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ output }));
     }

@@ -8,6 +8,7 @@ import {
   restartProjectContainer,
   getContainerHealth,
   execInProjectContainer,
+  writeTaskFile,
   getProjectMemory,
   getProjectLogs,
   sendMessageToAgent,
@@ -362,8 +363,7 @@ router.post('/:name/task', async (req, res) => {
   };
 
   try {
-    const json = JSON.stringify(taskDef, null, 2);
-    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await writeTaskFile(project.name, taskDef);
     res.status(201).json({ ok: true, task: taskDef });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -398,8 +398,7 @@ router.post('/:name/task/resume', async (req, res) => {
     task.status = 'running';
     task.completed_at = null;
     task.completion_reason = null;
-    const json = JSON.stringify(task, null, 2);
-    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await writeTaskFile(project.name, task);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -434,8 +433,7 @@ router.post('/:name/task/stop', async (req, res) => {
     task.status = 'stopped';
     task.completed_at = new Date().toISOString();
     task.completion_reason = 'manual_stop';
-    const json = JSON.stringify(task, null, 2);
-    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await writeTaskFile(project.name, task);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });
@@ -494,8 +492,7 @@ router.post('/:name/task/respond', async (req, res) => {
     question.answer = parsed.data.answer;
     question.answered_at = new Date().toISOString();
 
-    const json = JSON.stringify(task, null, 2);
-    await execInProjectContainer(project.name, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+    await writeTaskFile(project.name, task);
     res.json({ ok: true, task });
   } catch (err: any) {
     res.status(500).json({ error: 'exec_error', message: err.message });

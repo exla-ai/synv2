@@ -273,6 +273,37 @@ export async function execInProjectContainer(projectName: string, cmd: string[])
 }
 
 /**
+ * Write the .task.json file to the project container.
+ * Uses the worker's dedicated /task endpoint for worker projects (avoids shell quoting issues with /exec).
+ */
+export async function writeTaskFile(projectName: string, taskDef: Record<string, unknown>): Promise<void> {
+  const workerUrl = getWorkerUrl(projectName);
+
+  if (workerUrl) {
+    const worker = getWorkerByProject(projectName)!;
+    const res = await fetch(`${workerUrl}/task`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${worker.worker_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(taskDef),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'unknown' })) as any;
+      throw new Error(err.error || `Worker task write failed: ${res.status}`);
+    }
+    return;
+  }
+
+  // Local container: use docker exec
+  const json = JSON.stringify(taskDef, null, 2);
+  await dockerService.execInContainer(projectName, ['bash', '-c', `cat > /workspace/.task.json << 'TASKEOF'\n${json}\nTASKEOF`]);
+}
+
+/**
  * Get container health info — routes through worker if one exists.
  */
 export async function getContainerHealth(projectName: string): Promise<any | null> {
