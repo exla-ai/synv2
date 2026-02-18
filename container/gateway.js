@@ -112,10 +112,10 @@ function connectToOpenClaw() {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: 'synv2-bridge',
+              id: 'claude-code',
               version: '0.1.0',
               platform: 'linux',
-              mode: 'headless',
+              mode: 'cli',
             },
             role: 'operator',
             scopes: ['operator.read', 'operator.write'],
