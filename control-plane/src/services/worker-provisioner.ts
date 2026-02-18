@@ -18,6 +18,7 @@ function getDiskSizeGb(instanceType: string): number {
   const size = instanceType.split('.')[1];
   if (size?.includes('xlarge')) {
     const multiplier = parseInt(size) || 1;
+    if (multiplier >= 24) return 500;
     if (multiplier >= 12) return 200;
     if (multiplier >= 4) return 100;
   }

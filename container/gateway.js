@@ -136,7 +136,15 @@ function connectToOpenClaw() {
           bufferAndBroadcast({ type: 'done' });
         } else if (p.state === 'error') {
           agentBusy = false;
-          bufferAndBroadcast({ type: 'error', error: p.errorMessage || 'Chat error' });
+          const errorDetail = {
+            type: 'error',
+            error: p.errorMessage || 'Chat error',
+            errorCode: p.errorCode || p.code || null,
+            errorType: p.errorType || p.type || null,
+            payload: p.errorMessage ? null : JSON.stringify(p).slice(0, 500),
+          };
+          console.error('OpenClaw chat error:', JSON.stringify(errorDetail));
+          bufferAndBroadcast(errorDetail);
         } else if (p.state === 'aborted') {
           agentBusy = false;
           bufferAndBroadcast({ type: 'done' });
@@ -173,8 +181,16 @@ function connectToOpenClaw() {
         // chat.send acknowledged
         agentBusy = true;
       } else if (!msg.ok && msg.error) {
-        console.error('OpenClaw error:', JSON.stringify(msg.error));
-        bufferAndBroadcast({ type: 'error', error: msg.error?.message || msg.error?.code || 'OpenClaw error' });
+        const errObj = msg.error || {};
+        const errorDetail = {
+          type: 'error',
+          error: errObj.message || errObj.code || 'OpenClaw error',
+          errorCode: errObj.code || null,
+          errorType: errObj.type || null,
+          payload: JSON.stringify(errObj).slice(0, 500),
+        };
+        console.error('OpenClaw response error:', JSON.stringify(errorDetail));
+        bufferAndBroadcast(errorDetail);
       }
     }
   });

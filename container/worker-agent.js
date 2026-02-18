@@ -5,6 +5,7 @@ const http = require('http');
 const { WebSocketServer, WebSocket } = require('ws');
 const { execSync, exec } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 
 // ── Configuration ─────────────────────────────────────────────
@@ -26,6 +27,7 @@ const VOLUME_NAME = `synv2-${PROJECT_NAME}-workspace`;
 const NETWORK_NAME = 'synv2-net';
 const IMAGE_NAME = 'synv2-project';
 const GATEWAY_PORT = 18789;
+const SUPERVISOR_LOG_FILE = '/workspace/.supervisor.log';
 
 console.log(`Worker agent starting for project: ${PROJECT_NAME}`);
 console.log(`Port: ${PORT}`);
@@ -81,15 +83,22 @@ async function createContainer(env) {
   // Build env args
   const envArgs = Object.entries(env).map(([k, v]) => `-e "${k}=${v}"`).join(' ');
 
-  // Get resource limits from env or use defaults
-  const memoryMb = parseInt(env.INSTANCE_MEMORY_MB || '2048');
-  const cpus = parseInt(env.INSTANCE_CPUS || '2');
+  const limits = resolveContainerLimits(env);
+  console.log(
+    `[container-limits] project=${PROJECT_NAME}` +
+    ` host_cpus=${limits.hostCpus}` +
+    ` host_memory_mb=${limits.hostMemoryMb}` +
+    ` requested_cpus=${String(limits.requestedCpus)}` +
+    ` requested_memory_mb=${String(limits.requestedMemoryMb)}` +
+    ` applied_cpus=${limits.cpus}` +
+    ` applied_memory_mb=${limits.memoryMb}`
+  );
 
   const cmd = `docker run -d --name ${CONTAINER_NAME}` +
     ` --network ${NETWORK_NAME}` +
     ` --restart unless-stopped` +
-    ` --memory ${memoryMb}m` +
-    ` --cpus ${cpus}` +
+    ` --memory ${limits.memoryMb}m` +
+    ` --cpus ${limits.cpus}` +
     ` -v ${VOLUME_NAME}:/workspace` +
     ` ${envArgs}` +
     ` ${IMAGE_NAME}`;
@@ -131,6 +140,19 @@ async function destroyContainer(removeVolume = false) {
 
 function execInContainer(cmd) {
   return execSync(`docker exec ${CONTAINER_NAME} ${cmd}`, { timeout: 30000 }).toString();
+}
+
+function resolveContainerLimits(env) {
+  const hostCpus = Math.max(1, os.cpus().length || 1);
+  const hostMemoryMb = Math.max(1024, Math.floor(os.totalmem() / (1024 * 1024)));
+  const requestedCpus = Number.parseFloat(env.INSTANCE_CPUS || '');
+  const requestedMemoryMb = Number.parseInt(env.INSTANCE_MEMORY_MB || '', 10);
+
+  const cpus = Math.max(1, Math.min(hostCpus, Number.isFinite(requestedCpus) ? requestedCpus : hostCpus));
+  const memoryMbCap = Math.max(1024, Math.floor(hostMemoryMb * 0.9));
+  const memoryMb = Math.max(1024, Math.min(memoryMbCap, Number.isFinite(requestedMemoryMb) ? requestedMemoryMb : memoryMbCap));
+
+  return { cpus, memoryMb, hostCpus, hostMemoryMb, requestedCpus, requestedMemoryMb };
 }
 
 // ── HTTP request body parser ─────────────────────────────────
@@ -260,7 +282,7 @@ const server = http.createServer(async (req, res) => {
     else if (path === '/logs' && method === 'GET') {
       const lines = url.searchParams.get('lines') || '100';
       let logs = '';
-      try { logs = execInContainer(`tail -n ${lines} /tmp/supervisor.log`); } catch {}
+      try { logs = execInContainer(`tail -n ${lines} ${SUPERVISOR_LOG_FILE}`); } catch {}
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ logs }));
     }
@@ -277,6 +299,35 @@ const server = http.createServer(async (req, res) => {
       const output = execInContainer(cmd.join(' '));
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ output }));
+    }
+
+    // POST /supervisor/control — proxy supervisor control to container gateway
+    else if (path === '/supervisor/control' && method === 'POST') {
+      const body = await parseBody(req);
+      const action = body.action;
+      if (!action) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'action required' }));
+        return;
+      }
+
+      const ip = getContainerIp();
+      if (!ip) {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'container_not_running' }));
+        return;
+      }
+
+      const gRes = await fetch(`http://${ip}:${GATEWAY_PORT}/supervisor/control`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      const result = await gRes.json();
+      res.writeHead(gRes.status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
     }
 
     // POST /message — send message to agent via gateway

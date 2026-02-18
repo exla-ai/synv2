@@ -10,6 +10,30 @@ const HEALTH_INTERVAL_MS = 2_000;
 const DEFAULT_MEMORY_MB = parseInt(process.env.CONTAINER_MEMORY_MB || '230000');
 const DEFAULT_CPUS = parseInt(process.env.CONTAINER_CPUS || '30');
 
+function inferInstanceLimits(instanceType: string | null): { cpus: number; memoryMb: number } | null {
+  if (!instanceType) return null;
+  const parts = instanceType.split('.');
+  if (parts.length < 2) return null;
+  const family = parts[0].toLowerCase();
+  const size = parts[1].toLowerCase();
+
+  let cpus = 0;
+  if (size === 'large') cpus = 2;
+  else if (size === 'xlarge') cpus = 4;
+  else {
+    const m = size.match(/^([0-9]+)xlarge$/);
+    if (m) cpus = parseInt(m[1], 10) * 4;
+  }
+  if (cpus <= 0 || Number.isNaN(cpus)) return null;
+
+  let memPerCpuGb = 2;
+  if (family.startsWith('r') || family.startsWith('x')) memPerCpuGb = 8;
+  else if (family.startsWith('m')) memPerCpuGb = 4;
+  else if (family.startsWith('c') || family.startsWith('t')) memPerCpuGb = 2;
+
+  return { cpus, memoryMb: cpus * memPerCpuGb * 1024 };
+}
+
 /** Build the full env var map for a project container */
 export async function buildContainerEnv(projectName: string): Promise<Record<string, string>> {
   const project = getProject(projectName);
@@ -38,11 +62,33 @@ export async function buildContainerEnv(projectName: string): Promise<Record<str
 
   // Inject instance metadata so agents know their hardware
   const meta = await getInstanceMetadata();
-  env.INSTANCE_TYPE = meta.instanceType;
-  env.INSTANCE_CPUS = String(DEFAULT_CPUS);
-  env.INSTANCE_MEMORY_MB = String(DEFAULT_MEMORY_MB);
-  env.HOST_CPUS = String(meta.cpus);
-  env.HOST_MEMORY_MB = String(meta.memoryMb);
+  const inferred = inferInstanceLimits(project.instance_type);
+  const effectiveType = project.instance_type || meta.instanceType;
+
+  // For worker mode (project has explicit instance_type), use the instance's actual
+  // resources instead of clamping to defaults — the container IS the whole machine.
+  // For local mode (no instance_type), clamp to defaults to share the host.
+  const hasExplicitInstance = !!project.instance_type;
+  const instanceCpus = inferred?.cpus ?? DEFAULT_CPUS;
+  const instanceMemoryMb = inferred?.memoryMb ?? DEFAULT_MEMORY_MB;
+
+  let effectiveCpus: number;
+  let effectiveMemoryMb: number;
+  if (hasExplicitInstance && inferred) {
+    // Worker mode: give container the full instance resources (90% memory for OS overhead)
+    effectiveCpus = instanceCpus;
+    effectiveMemoryMb = Math.floor(instanceMemoryMb * 0.9);
+  } else {
+    // Local mode: clamp to defaults
+    effectiveCpus = Math.max(1, Math.min(DEFAULT_CPUS, instanceCpus));
+    effectiveMemoryMb = Math.max(2048, Math.min(DEFAULT_MEMORY_MB, Math.floor(instanceMemoryMb * 0.9)));
+  }
+
+  env.INSTANCE_TYPE = effectiveType;
+  env.INSTANCE_CPUS = String(effectiveCpus);
+  env.INSTANCE_MEMORY_MB = String(effectiveMemoryMb);
+  env.HOST_CPUS = String(inferred?.cpus ?? meta.cpus);
+  env.HOST_MEMORY_MB = String(inferred?.memoryMb ?? meta.memoryMb);
 
   return env;
 }
@@ -86,8 +132,8 @@ export async function createProjectContainer(projectName: string): Promise<strin
   const containerId = await dockerService.createContainer({
     name: projectName,
     env,
-    memoryMb: DEFAULT_MEMORY_MB,
-    cpus: DEFAULT_CPUS,
+    memoryMb: parseInt(env.INSTANCE_MEMORY_MB) || DEFAULT_MEMORY_MB,
+    cpus: parseInt(env.INSTANCE_CPUS) || DEFAULT_CPUS,
   });
 
   updateProject(projectName, { container_id: containerId, status: 'running' });
@@ -336,7 +382,7 @@ export async function getProjectLogs(projectName: string, lines: number): Promis
     return data.logs || '';
   }
 
-  return dockerService.execInContainer(projectName, ['tail', '-n', String(lines), '/tmp/supervisor.log']);
+  return dockerService.execInContainer(projectName, ['tail', '-n', String(lines), '/workspace/.supervisor.log']);
 }
 
 /**

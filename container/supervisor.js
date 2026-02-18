@@ -10,7 +10,7 @@ const { execSync } = require('child_process');
 
 const BRIDGE_PORT = parseInt(process.env.GATEWAY_PORT || '18789');
 const PROJECT_NAME = process.env.PROJECT_NAME || 'project';
-const LOG_FILE = '/tmp/supervisor.log';
+const LOG_FILE = '/workspace/.supervisor.log';
 const TASK_FILE = '/workspace/.task.json';
 const ARCHIVE_DIR = '/workspace/.task-archive';
 
@@ -20,6 +20,9 @@ const IDLE_DELAY_MS = 300_000;             // 5 min when agent is idle
 const MAX_IDLE_DELAY_MS = 600_000;         // 10 min max idle delay
 const BACKOFF_DELAY_MS = 120_000;          // 2 min after empty/error turns
 const MAX_BACKOFF_MS = 600_000;            // 10 min max backoff
+const ERROR_BACKOFF_DELAY_MS = 180_000;    // 3 min after error turns (more aggressive)
+const MAX_ERROR_BACKOFF_MS = 600_000;      // 10 min max error backoff
+const MAX_CONSECUTIVE_ERRORS = 50;         // hard stop after 50 consecutive empty/error turns
 const EMPTY_THRESHOLD = 3;                 // after 3 consecutive empty turns, back off
 const RECOVERY_FULL_THRESHOLD = 5;         // after 5 empty turns, resend full prompt
 const RECOVERY_DIRECTIVE_THRESHOLD = 10;   // after 10 empty turns, send directive recovery prompt
@@ -27,7 +30,13 @@ const RECOVERY_RESET_THRESHOLD = 20;       // after 20 empty turns, full reset +
 const HUMAN_RESUME_DELAY_MS = 10_000;      // 10s after last human disconnects
 const NEEDS_INPUT_POLL_MS = 120_000;       // 2 min polling when blocked on questions
 const VERIFY_EVERY_N_TURNS = 10;           // run verify_command every N productive turns
-const MEMORY_WARN_TURNS = 3;              // warn after N productive turns without memory update
+const LOG_ROTATE_MAX_BYTES = 10 * 1024 * 1024;
+const LOG_ROTATE_KEEP_BYTES = 5 * 1024 * 1024;
+const SHORT_MEMORY_FILE = '/workspace/SHORT_TERM_MEMORY.md';
+const LONG_MEMORY_FILE = '/workspace/LONG_TERM_MEMORY.md';
+const MEMORY_MODEL = process.env.MEMORY_MODEL || 'claude-3-5-haiku-latest';
+const MEMORY_TURNS_PER_CONSOLIDATION = 5;
+const MAX_TURN_SUMMARY_CHARS = 12_000;
 
 // Thresholds for classifying turn productivity
 const IDLE_CHARS_THRESHOLD = 200;
@@ -42,11 +51,15 @@ const STATE = {
   PAUSED: 'PAUSED',
   NEEDS_INPUT: 'NEEDS_INPUT',
   COMPLETED: 'COMPLETED',
+  ERROR_STOPPED: 'ERROR_STOPPED',
 };
+
+const SUPERVISOR_STATUS_FILE = '/workspace/.supervisor-status.json';
 
 let state = STATE.INIT;
 let turnCount = 0;
 let consecutiveEmpty = 0;
+let consecutiveErrors = 0;
 let consecutiveIdle = 0;
 let humanCount = 0;
 let agentBusy = false;
@@ -61,33 +74,62 @@ let turnToolCount = 0;
 let turnMsgCount = 0;
 let turnText = '';
 let firstPromptSent = false;
-let lastMemoryHash = '';
-let turnsSinceMemoryUpdate = 0;
 let productiveTurnsSinceVerify = 0;
+let productiveTurnsSinceConsolidation = 0;
 let currentTask = null;              // Loaded from .task.json
 let lastSeenAnswers = {};            // { questionId: answered_at|null } for detecting new answers
 let needsInputTimer = null;
+let memoryWork = Promise.resolve();
+
+function rotateLogIfNeeded() {
+  try {
+    const stats = fs.statSync(LOG_FILE);
+    if (stats.size <= LOG_ROTATE_MAX_BYTES) return;
+    const start = Math.max(0, stats.size - LOG_ROTATE_KEEP_BYTES);
+    const bytesToRead = stats.size - start;
+    const fd = fs.openSync(LOG_FILE, 'r');
+    const tail = Buffer.alloc(bytesToRead);
+    fs.readSync(fd, tail, 0, bytesToRead, start);
+    fs.closeSync(fd);
+    fs.writeFileSync(LOG_FILE, tail);
+  } catch {}
+}
 
 function log(msg) {
   const line = `[${new Date().toISOString()}] [${state}] ${msg}`;
   console.log(line);
-  try { fs.appendFileSync(LOG_FILE, line + '\n'); } catch {}
+  try {
+    rotateLogIfNeeded();
+    fs.appendFileSync(LOG_FILE, line + '\n');
+  } catch {}
 }
 
 function readFile(p) {
   try { return fs.readFileSync(p, 'utf-8'); } catch { return null; }
 }
 
+function writeFile(p, value) {
+  try {
+    fs.writeFileSync(p, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function appendFile(p, value) {
+  try {
+    fs.appendFileSync(p, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function setState(newState) {
   const old = state;
   state = newState;
   if (old !== newState) log(`State: ${old} → ${newState}`);
-}
-
-function hashMemory() {
-  const short = readFile('/workspace/SHORT_TERM_MEMORY.md') || '';
-  const long = readFile('/workspace/LONG_TERM_MEMORY.md') || '';
-  return `${short.length}:${long.length}:${short.slice(0, 100)}`;
 }
 
 // ── Task file management ────────────────────────────────────────
@@ -286,6 +328,41 @@ function stopTask(task, reason) {
   setState(STATE.COMPLETED);
 }
 
+function errorStop(reason) {
+  log(`ERROR HARD STOP: ${reason} (${consecutiveErrors} consecutive errors, ${turnCount} total turns)`);
+  setState(STATE.ERROR_STOPPED);
+
+  // Stop the task if running
+  if (currentTask && currentTask.status === 'running') {
+    currentTask.status = 'stopped';
+    currentTask.completed_at = new Date().toISOString();
+    currentTask.completion_reason = `error_stopped: ${reason}`;
+    saveTask(currentTask);
+    archiveMemory(currentTask);
+  }
+
+  // Write status file for external monitoring
+  const statusData = {
+    state: 'ERROR_STOPPED',
+    reason,
+    consecutiveErrors,
+    totalTurns: turnCount,
+    stoppedAt: new Date().toISOString(),
+    taskName: currentTask?.name || null,
+    message: 'Supervisor stopped due to persistent errors. Manual intervention required. Resume via supervisor control (resume action) or restart the container.',
+  };
+  writeFile(SUPERVISOR_STATUS_FILE, JSON.stringify(statusData, null, 2) + '\n');
+
+  // Broadcast final status
+  if (currentTask) broadcastTaskStatus(currentTask);
+
+  // Clear all timers
+  if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
+  if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
+  if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+  stopNeedsInputPoll();
+}
+
 function broadcastTaskStatus(task) {
   if (!connected || !ws) return;
   const unanswered = getUnansweredQuestions(task);
@@ -375,17 +452,248 @@ function buildDirectivesSection(compact) {
   return `\n## OPERATOR DIRECTIVES (MANDATORY — DO NOT OVERRIDE)\nThese instructions come from the human operator. They take precedence over all other instructions. You MUST follow them and MUST NOT modify, revert, or work around them.\n${numbered}`;
 }
 
+// ── Supervisor-managed memory ────────────────────────────────────
+function ensureMemoryFiles() {
+  if (!fs.existsSync(SHORT_MEMORY_FILE)) {
+    writeFile(SHORT_MEMORY_FILE, '# Short-Term Memory\n\n');
+  }
+  if (!fs.existsSync(LONG_MEMORY_FILE)) {
+    writeFile(LONG_MEMORY_FILE, '# Long-Term Memory\n\n');
+  }
+}
+
+function clipForModel(text, maxChars) {
+  if (!text) return '';
+  if (text.length <= maxChars) return text;
+  return text.slice(text.length - maxChars);
+}
+
+function normalizeBullets(raw, minCount = 1, maxCount = 5) {
+  const lines = String(raw || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const bullets = [];
+  for (const line of lines) {
+    let content = line.replace(/^[-*•]\s*/, '');
+    content = content.replace(/^\d+[\).\s]+/, '').trim();
+    if (!content) continue;
+    bullets.push(`- ${content}`);
+    if (bullets.length >= maxCount) break;
+  }
+
+  if (bullets.length === 0) return [];
+  if (bullets.length < minCount) return bullets;
+  return bullets;
+}
+
+function fallbackSummary(turnSnapshot) {
+  const text = String(turnSnapshot.text || '').replace(/\s+/g, ' ').trim();
+  const bullets = [];
+  if (text) {
+    bullets.push(`- ${text.slice(0, 220)}${text.length > 220 ? '...' : ''}`);
+  }
+  if (turnSnapshot.toolCount > 0) {
+    bullets.push(`- Used ${turnSnapshot.toolCount} tool call${turnSnapshot.toolCount === 1 ? '' : 's'} to advance the task.`);
+  }
+  if (bullets.length === 0) {
+    bullets.push('- Progress was made, but no agent text was emitted in this turn.');
+  }
+  return bullets.slice(0, 5);
+}
+
+function parseFirstJsonObject(raw) {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {}
+
+  const match = trimmed.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[0]);
+  } catch {
+    return null;
+  }
+}
+
+async function callHaiku(system, user, maxTokens = 500) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY is not configured');
+  }
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: MEMORY_MODEL,
+      max_tokens: maxTokens,
+      temperature: 0.1,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`Haiku call failed (${res.status}): ${body.slice(0, 200)}`);
+  }
+
+  const data = await res.json();
+  const text = Array.isArray(data.content)
+    ? data.content
+      .filter((item) => item && item.type === 'text')
+      .map((item) => item.text || '')
+      .join('\n')
+      .trim()
+    : '';
+
+  if (!text) throw new Error('Haiku response contained no text');
+  return text;
+}
+
+async function appendShortTermMemory(turnSnapshot) {
+  ensureMemoryFiles();
+  const taskName = currentTask && currentTask.name ? currentTask.name : PROJECT_NAME;
+  const clippedTurn = clipForModel(turnSnapshot.text || '', MAX_TURN_SUMMARY_CHARS);
+
+  let bullets = [];
+  try {
+    const response = await callHaiku(
+      'You summarize an autonomous coding turn into concrete memory notes. Return only 2-5 bullet lines, each starting with "- ".',
+      `Project: ${PROJECT_NAME}
+Task: ${taskName}
+Turn: ${turnSnapshot.turnNumber}
+Tool calls in turn: ${turnSnapshot.toolCount}
+
+Turn output:
+${clippedTurn || '(no text output)'}
+`,
+      400,
+    );
+    bullets = normalizeBullets(response, 2, 5);
+  } catch (err) {
+    log(`Haiku turn summary failed: ${err.message}`);
+  }
+
+  if (bullets.length === 0) {
+    bullets = fallbackSummary(turnSnapshot);
+  }
+
+  const heading = `\n### ${new Date().toISOString()} | Turn ${turnSnapshot.turnNumber} | ${taskName}\n`;
+  const entry = heading + bullets.join('\n') + '\n';
+  if (!appendFile(SHORT_MEMORY_FILE, entry)) {
+    log('Failed to append short-term memory entry');
+    return;
+  }
+  log(`Short-term memory updated from turn ${turnSnapshot.turnNumber} (${bullets.length} bullets)`);
+}
+
+async function consolidateMemory() {
+  ensureMemoryFiles();
+  const shortMem = readFile(SHORT_MEMORY_FILE) || '';
+  const longMem = readFile(LONG_MEMORY_FILE) || '';
+
+  if (!shortMem.trim()) return;
+
+  let parsed = null;
+  try {
+    const response = await callHaiku(
+      'You manage two memory files for an autonomous coding agent. Return strict JSON only.',
+      `Given the current memory files, promote durable facts to long-term memory and prune short-term memory.
+
+Return JSON with this exact shape:
+{
+  "long_term_additions": ["bullet", "..."],
+  "short_term_snapshot": ["bullet", "..."]
+}
+
+Rules:
+- long_term_additions: 0-8 durable items (decisions, constraints, stable findings)
+- short_term_snapshot: 3-12 active-context items only (next steps, open risks, active work)
+- No markdown, no code fences.
+
+LONG_TERM_MEMORY.md:
+${clipForModel(longMem, 20_000)}
+
+SHORT_TERM_MEMORY.md:
+${clipForModel(shortMem, 25_000)}
+`,
+      900,
+    );
+    parsed = parseFirstJsonObject(response);
+  } catch (err) {
+    log(`Haiku memory consolidation failed: ${err.message}`);
+    return;
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    log('Memory consolidation failed: invalid JSON payload from Haiku');
+    return;
+  }
+
+  const longItems = Array.isArray(parsed.long_term_additions)
+    ? normalizeBullets(parsed.long_term_additions.join('\n'), 0, 12)
+    : [];
+  const shortItems = Array.isArray(parsed.short_term_snapshot)
+    ? normalizeBullets(parsed.short_term_snapshot.join('\n'), 0, 16)
+    : [];
+  const now = new Date().toISOString();
+
+  if (longItems.length > 0) {
+    const longEntry = `\n### ${now} | Consolidated from recent turns\n${longItems.join('\n')}\n`;
+    if (!appendFile(LONG_MEMORY_FILE, longEntry)) {
+      log('Failed to append long-term memory consolidation entry');
+    }
+  }
+
+  const shortBody = shortItems.length > 0 ? shortItems.join('\n') : '- No active short-term items.';
+  const shortContent = `# Short-Term Memory\n\n_Last consolidated: ${now}_\n\n${shortBody}\n`;
+  if (!writeFile(SHORT_MEMORY_FILE, shortContent)) {
+    log('Failed to rewrite short-term memory during consolidation');
+    return;
+  }
+
+  log(`Memory consolidated (long_term_additions=${longItems.length}, short_term_snapshot=${shortItems.length})`);
+}
+
+function queueMemoryWorkForTurn(classification) {
+  if (classification !== 'productive') return;
+
+  const snapshot = {
+    turnNumber: turnCount,
+    toolCount: turnToolCount,
+    text: turnText,
+  };
+
+  memoryWork = memoryWork
+    .then(async () => {
+      await appendShortTermMemory(snapshot);
+      productiveTurnsSinceConsolidation++;
+      if (productiveTurnsSinceConsolidation >= MEMORY_TURNS_PER_CONSOLIDATION) {
+        productiveTurnsSinceConsolidation = 0;
+        await consolidateMemory();
+      }
+    })
+    .catch((err) => {
+      log(`Memory pipeline error: ${err.message}`);
+    });
+}
+
 // ── Prompt builders ─────────────────────────────────────────────
 function buildFullPrompt() {
   const task = currentTask;
-  const shortMem = readFile('/workspace/SHORT_TERM_MEMORY.md') || '(empty)';
-  const longMem = readFile('/workspace/LONG_TERM_MEMORY.md') || '(empty)';
+  const shortMem = readFile(SHORT_MEMORY_FILE) || '(empty)';
+  const longMem = readFile(LONG_MEMORY_FILE) || '(empty)';
   const plan = readFile('/workspace/plan.md') || '(no plan)';
   const processInfo = getProcessInfo(task);
   const progress = getTaskProgress(task);
-
-  lastMemoryHash = hashMemory();
-  turnsSinceMemoryUpdate = 0;
 
   // Build goal section from task or use generic
   let goalSection;
@@ -414,7 +722,8 @@ The supervisor will verify your work${task.goal && task.goal.verify_command ? ' 
 Your workspace is /workspace. You have passwordless sudo, uv, clang-16, gcc, cmake, tmux, Python 3, scikit-learn, numpy, scipy.
 
 This is a PERSISTENT SESSION — a supervisor sends you periodic prompts to keep you working.
-Your memory files in /workspace/ provide continuity across context compaction.
+Memory files are managed by the supervisor and provided for context only.
+Treat /workspace/SHORT_TERM_MEMORY.md and /workspace/LONG_TERM_MEMORY.md as read-only.
 
 ## Your Short-Term Memory
 ${shortMem}
@@ -433,14 +742,14 @@ ${plan}
 2. Check running processes (tmux ls, ps aux). Do NOT restart processes that are already working.
 3. Identify the highest-priority task that isn't already running.
 4. Execute it. **Maximize parallelism** — use tmux sessions and background jobs to use ALL available CPUs.
-5. BEFORE YOUR TURN ENDS: Update /workspace/SHORT_TERM_MEMORY.md and /workspace/LONG_TERM_MEMORY.md.
+5. Report concrete progress, blockers, and next actions in your reply.
 
 ${goalSection}
 
 ## KEY RULES
 - Use sudo freely for package installation
 - Use tmux for long tasks: \`tmux new-session -d -s <name> '<command>'\`
-- ALWAYS update memory files before finishing your turn
+- Memory files are supervisor-managed; do not edit SHORT_TERM_MEMORY.md or LONG_TERM_MEMORY.md
 - Use ALL available CPU cores — run parallel experiments!
 - Git commit progress regularly
 ${completionInstructions}
@@ -458,29 +767,10 @@ Go.`;
 
 function buildContinuationPrompt() {
   const task = currentTask;
-  const currentHash = hashMemory();
-  const memoryChanged = currentHash !== lastMemoryHash;
-
-  if (memoryChanged) {
-    turnsSinceMemoryUpdate = 0;
-  }
-  lastMemoryHash = currentHash;
-
+  const shortMem = readFile(SHORT_MEMORY_FILE) || '(empty)';
+  const longMem = readFile(LONG_MEMORY_FILE) || '(empty)';
   const processInfo = getProcessInfo(task);
   const progress = getTaskProgress(task);
-
-  let memorySection = '';
-  if (memoryChanged) {
-    const shortMem = readFile('/workspace/SHORT_TERM_MEMORY.md') || '(empty)';
-    const longMem = readFile('/workspace/LONG_TERM_MEMORY.md') || '(empty)';
-    memorySection = `\n## Updated Memory Files\n### Short-Term\n${shortMem}\n### Long-Term\n${longMem}`;
-  }
-
-  // Memory update reminder
-  let memoryReminder = '';
-  if (turnsSinceMemoryUpdate >= MEMORY_WARN_TURNS) {
-    memoryReminder = '\n**IMPORTANT: You have not updated your memory files in several turns. Update /workspace/SHORT_TERM_MEMORY.md and /workspace/LONG_TERM_MEMORY.md NOW before continuing.**';
-  }
 
   // Task-specific continuation
   let taskNote = '';
@@ -513,13 +803,20 @@ function buildContinuationPrompt() {
     }
   }
 
-  return `[${new Date().toISOString()}] Continue working.${taskNote} ${memoryChanged ? 'Memory files were updated externally.' : 'You already have your memory in context.'}
+  return `[${new Date().toISOString()}] Continue working.${taskNote}
+Memory files are supervisor-managed and read-only: do not edit SHORT_TERM_MEMORY.md or LONG_TERM_MEMORY.md.
 ${processInfo}
 ${progress}
-${memorySection}
-${memoryReminder}${answersSection}${questionsSection}${buildDirectivesSection(true)}
+
+## Short-Term Memory
+${shortMem}
+
+## Long-Term Memory
+${longMem}
+
+${answersSection}${questionsSection}${buildDirectivesSection(true)}
 Keep making progress. If all experiments are running and stable, look for NEW optimizations to try.
-Update memory files before your turn ends.${task && task.status === 'running' ? '\nWhen task is fully complete, update /workspace/.task.json status to "completed".' : ''}`;
+${task && task.status === 'running' ? 'When task is fully complete, update /workspace/.task.json status to "completed".' : ''}`;
 }
 
 function buildIdleCheckPrompt() {
@@ -556,8 +853,8 @@ Please continue working to meet the goal criteria. Update /workspace/.task.json 
 
 function buildRecoveryPrompt() {
   const task = currentTask;
-  const shortMem = readFile('/workspace/SHORT_TERM_MEMORY.md') || '(empty)';
-  const longMem = readFile('/workspace/LONG_TERM_MEMORY.md') || '(empty)';
+  const shortMem = readFile(SHORT_MEMORY_FILE) || '(empty)';
+  const longMem = readFile(LONG_MEMORY_FILE) || '(empty)';
 
   // Gather live system state
   let tmuxOutput = '', psOutput = '', diskOutput = '';
@@ -604,17 +901,17 @@ ${buildDirectivesSection(false)}
 
 1. **Check each tmux session**: Run \`tmux capture-pane -t <session> -p | tail -20\` for EVERY session listed above to see their current output.
 2. **Report findings**: Tell me what each process is doing — is it running, stuck, completed, errored?
-3. **If processes finished**: Collect their output, check results, update memory files, and plan next steps.
+3. **If processes finished**: Collect their output, check results, and plan next steps.
 4. **If processes are still running**: Note their progress and estimate completion time.
 5. **If no processes are running**: Review your memory files and start the next task.
-6. **Update /workspace/SHORT_TERM_MEMORY.md** with current status BEFORE your turn ends.
+6. **Do not edit memory files directly**: SHORT_TERM_MEMORY.md and LONG_TERM_MEMORY.md are supervisor-managed.
 
 You MUST take action and produce output. Do not return an empty response.`;
 }
 
 // ── Turn management ─────────────────────────────────────────────
 function sendPrompt() {
-  if (state === STATE.COMPLETED || state === STATE.NEEDS_INPUT) {
+  if (state === STATE.COMPLETED || state === STATE.NEEDS_INPUT || state === STATE.ERROR_STOPPED) {
     log(`In ${state} state — not sending prompt`);
     return;
   }
@@ -712,14 +1009,8 @@ function onTurnEnd(result) {
 
   const classification = result === 'timeout' ? 'productive' : (result === 'error' ? 'error' : classifyTurn());
 
-  // Track memory updates
-  const currentHash = hashMemory();
-  if (currentHash !== lastMemoryHash) {
-    turnsSinceMemoryUpdate = 0;
-    lastMemoryHash = currentHash;
-  } else if (classification === 'productive' || classification === 'ok') {
-    turnsSinceMemoryUpdate++;
-  }
+  // Supervisor-managed memory updates after productive turns
+  queueMemoryWorkForTurn(classification);
 
   // Check task auto-stop conditions
   if (currentTask && currentTask.status === 'running') {
@@ -745,6 +1036,19 @@ function onTurnEnd(result) {
       startNeedsInputPoll();
       return;
     }
+  }
+
+  // Track consecutive errors (empty + error turns)
+  if (classification === 'empty' || classification === 'error') {
+    consecutiveErrors++;
+  } else {
+    consecutiveErrors = 0;
+  }
+
+  // Hard stop after too many consecutive errors
+  if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+    errorStop(`${consecutiveErrors} consecutive ${classification} turns`);
+    return;
   }
 
   let delay;
@@ -779,7 +1083,7 @@ function onTurnEnd(result) {
 
     case 'error':
       consecutiveEmpty++;
-      delay = BACKOFF_DELAY_MS;
+      delay = Math.min(ERROR_BACKOFF_DELAY_MS * Math.pow(2, Math.max(0, consecutiveErrors - 3)), MAX_ERROR_BACKOFF_MS);
       break;
 
     default:
@@ -873,14 +1177,16 @@ function scheduleTurnDelay(delay) {
 function startTaskPoll() {
   if (taskPollTimer) return;
   taskPollTimer = setInterval(() => {
-    if (state !== STATE.COMPLETED && state !== STATE.NEEDS_INPUT) return;
+    if (state !== STATE.COMPLETED && state !== STATE.NEEDS_INPUT && state !== STATE.ERROR_STOPPED) return;
     const task = loadTask();
     if (task && task.status === 'running') {
       log('Task resumed (status set back to running) — restarting prompt loop');
       currentTask = task;
       consecutiveIdle = 0;
       consecutiveEmpty = 0;
+      consecutiveErrors = 0;
       productiveTurnsSinceVerify = 0;
+      try { fs.unlinkSync(SUPERVISOR_STATUS_FILE); } catch {}
       firstPromptSent = false;
       if (humanCount > 0) {
         setState(STATE.PAUSED);
@@ -1010,9 +1316,12 @@ function connectToGateway() {
       } else if (action === 'resume') {
         consecutiveEmpty = 0;
         consecutiveIdle = 0;
-        if (state === STATE.PAUSED || state === STATE.COMPLETED || state === STATE.NEEDS_INPUT) {
+        consecutiveErrors = 0;
+        if (state === STATE.PAUSED || state === STATE.COMPLETED || state === STATE.NEEDS_INPUT || state === STATE.ERROR_STOPPED) {
           stopNeedsInputPoll();
-          log('Resumed by operator');
+          log(`Resumed by operator (was ${state})`);
+          // Clean up error status file on resume
+          try { fs.unlinkSync(SUPERVISOR_STATUS_FILE); } catch {}
           if (agentBusy) {
             setState(STATE.WAITING);
           } else {
@@ -1063,6 +1372,7 @@ function connectToGateway() {
     }
     else if (msg.type === 'error') {
       turnMsgCount++;
+      log(`Error from agent: ${msg.error || msg.errorCode || msg.errorType || 'unknown'}`);
       if (state === STATE.WAITING) {
         onTurnEnd('error');
       } else {
@@ -1082,8 +1392,8 @@ function connectToGateway() {
     if (turnTimer) { clearTimeout(turnTimer); turnTimer = null; }
     if (delayTimer) { clearTimeout(delayTimer); delayTimer = null; }
     stopNeedsInputPoll();
-    // Preserve COMPLETED state across reconnects
-    if (state !== STATE.COMPLETED && state !== STATE.NEEDS_INPUT) {
+    // Preserve terminal states across reconnects
+    if (state !== STATE.COMPLETED && state !== STATE.NEEDS_INPUT && state !== STATE.ERROR_STOPPED) {
       setState(STATE.INIT);
     }
     firstPromptSent = false;
