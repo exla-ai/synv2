@@ -112,10 +112,10 @@ function connectToOpenClaw() {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: 'webchat',
+              id: 'synv2-bridge',
               version: '0.1.0',
               platform: 'linux',
-              mode: 'webchat',
+              mode: 'headless',
             },
             role: 'operator',
             scopes: ['operator.read', 'operator.write'],
