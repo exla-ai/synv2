@@ -112,7 +112,7 @@ function connectToOpenClaw() {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: 'claude-code',
+              id: 'webchat',
               version: '0.1.0',
               platform: 'linux',
               mode: 'cli',
