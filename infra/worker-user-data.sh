@@ -12,6 +12,8 @@ WORKER_AGENT_PORT="__WORKER_AGENT_PORT__"
 echo "Project: ${PROJECT_NAME}"
 echo "Control plane: ${CONTROL_PLANE_HOST}"
 
+export HOME=/root
+
 # ── Install Docker and build tools ────────────────────────────
 dnf install -y docker git gcc gcc-c++ make python3
 systemctl enable docker
