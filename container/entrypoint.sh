@@ -53,6 +53,7 @@ openclaw onboard \
   --gateway-port 18790 \
   --gateway-bind lan \
   --gateway-auth password \
+  --gateway-password "$GATEWAY_PASSWORD" \
   --skip-daemon \
   2>&1 || echo "Onboard completed (or already configured)"
 
